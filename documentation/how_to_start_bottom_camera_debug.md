@@ -15,10 +15,9 @@ source install/setup.bash
 ros2 launch src/launch/orca_bringup.launch.py publish_lk_debug_image:=true
 ```
 
-This enables both debug image topics:
+This enables the tile-line tracking debug image topic:
 
-- `/orca_auv/camera/bottom/debug/lk_tracks`
-- `/orca_auv/camera/bottom/debug/hough_lines`
+- `/orca_auv/camera/bottom/debug/tile_lines`
 
 ## On the Host Machine
 
@@ -32,7 +31,6 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 rqt
 ```
 
-Then open `rqt_image_view` and select one of these topics:
+Then open `rqt_image_view` and select this topic:
 
-- `/orca_auv/camera/bottom/debug/lk_tracks`
-- `/orca_auv/camera/bottom/debug/hough_lines`
+- `/orca_auv/camera/bottom/debug/tile_lines`

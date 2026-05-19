@@ -45,7 +45,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'publish_lk_debug_image',
             default_value='true',
-            description='Whether to publish LK keypoint overlay images',
+            description='Whether to publish tile-line debug overlay images',
         ),
         bottom_camera_pid_fbc_launch,
         depth_control_launch,
@@ -57,8 +57,6 @@ def generate_launch_description():
             parameters=[{
                 'image_topic': 'camera/bottom/image_raw',
                 'publish_debug_image': publish_lk_debug_image,
-                'publish_hough_debug_image': publish_lk_debug_image,
-                'enable_hough_yaw_correction': True,
             }],
         ),
         Node(

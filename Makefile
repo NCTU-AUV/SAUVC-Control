@@ -41,7 +41,7 @@ ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST
 all: init launch
 
 debug: init
-	@echo "Starting LK optical-flow and Hough-line debug viewers..."
+	@echo "Starting tile-line debug viewer..."
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		sleep 5; \
@@ -50,17 +50,8 @@ debug: init
 		chmod 700 \$$XDG_RUNTIME_DIR; \
 		export LIBGL_ALWAYS_SOFTWARE=1; \
 		export QT_X11_NO_MITSHM=1; \
-		exec rqt_image_view /orca_auv/camera/bottom/debug/lk_tracks"
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		sleep 5; \
-		export XDG_RUNTIME_DIR=/tmp/runtime-root; \
-		mkdir -p \$$XDG_RUNTIME_DIR; \
-		chmod 700 \$$XDG_RUNTIME_DIR; \
-		export LIBGL_ALWAYS_SOFTWARE=1; \
-		export QT_X11_NO_MITSHM=1; \
-		exec rqt_image_view /orca_auv/camera/bottom/debug/hough_lines"
-	@echo "Starting hardware launch with LK/Hough debug image publishing enabled..."
+		exec rqt_image_view /orca_auv/camera/bottom/debug/tile_lines"
+	@echo "Starting hardware launch with tile-line debug image publishing enabled..."
 	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		ros2 launch src/launch/orca_bringup.launch.py publish_lk_debug_image:=true"
@@ -158,8 +149,8 @@ clean: compose_clean
 .PHONY: \
 	sim_launch sim_launch_detached sim_stop sim_status sim_check sim_logs \
 	sim_gui_detached sim_wrench_sum_detached sim_activate_wrench_sum \
-	sim_set_manual sim_thruster_allocator_detached sim_lk_detached sim_rqt_lk \
-	sim_rqt_hough
+	sim_set_manual sim_thruster_allocator_detached sim_lk_detached \
+	sim_rqt_lk sim_rqt_tile_lines
 
 ROS_SETUP := cd $(WORKSPACE) && \
 	source /opt/ros/humble/setup.bash && \
@@ -174,10 +165,8 @@ sim_launch: sim_launch_detached sim_status
 	@echo "Open GUI at: http://localhost/controller"
 	@echo "Or from another device: http://<HOST_IP>/controller"
 	@echo ""
-	@echo "To view LK track:"
-	@echo "  make sim_rqt_lk"
-	@echo "To view Hough grid lines:"
-	@echo "  make sim_rqt_hough"
+	@echo "To view tile-line tracking:"
+	@echo "  make sim_rqt_tile_lines"
 
 sim_launch_detached: compose_up
 	@echo "Stopping old SAUVC-RPI simulation-control nodes..."
@@ -204,7 +193,7 @@ sim_launch_detached: compose_up
 		source /opt/ros/humble/setup.bash; \
 		ros2 daemon stop || true; \
 		sleep 1"
-	@echo "Starting simulation launch: GUI, LK, supervisor, controllers, wrench sum, thruster force allocator..."
+	@echo "Starting simulation launch: GUI, tile-line tracking, supervisor, controllers, wrench sum, thruster force allocator..."
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		exec ros2 launch src/launch/simulation_control.launch.py \
@@ -276,7 +265,7 @@ sim_status:
 		ros2 node list 2>/dev/null | sort -u | grep -E 'gui_node|supervisor_node|wrench_sum_node|wrench_to_individual|lk_total_transform|pid_controller|bottom_camera_pid_bridge|waypoint_target|yaw_reference|output_sink_force|float32_to_float64|imu_to_orientation|web_video_server' || true; \
 		echo ''; \
 		echo '--- Key topics ---'; \
-		ros2 topic list | grep -E 'wrench_sources/(gui|bottom_camera|depth)|wrench_command|thruster_[0-7]/force_N|debug/(lk_tracks|hough_lines)|camera/bottom/(image_raw|pose_px)|state/depth_m|targets/depth_m|system_manager/(mode|status)' || true; \
+		ros2 topic list | grep -E 'wrench_sources/(gui|bottom_camera|depth)|wrench_command|thruster_[0-7]/force_N|debug/tile_lines|camera/bottom/(image_raw|pose_px)|state/depth_m|targets/depth_m|system_manager/(mode|status)' || true; \
 		echo ''; \
 		echo '--- Lifecycle ---'; \
 		for node in \
@@ -301,11 +290,8 @@ sim_check:
 		echo '=== allocator -> simulation bridge ==='; \
 		ros2 topic info -v /orca_auv/thrusters/thruster_4/force_N || true; \
 		echo ''; \
-		echo '=== LK debug ==='; \
-		timeout 5s ros2 topic hz /orca_auv/camera/bottom/debug/lk_tracks --window 10 || true; \
-		echo ''; \
-		echo '=== Hough debug ==='; \
-		timeout 5s ros2 topic hz /orca_auv/camera/bottom/debug/hough_lines --window 10 || true"
+		echo '=== Tile-line debug ==='; \
+		timeout 5s ros2 topic hz /orca_auv/camera/bottom/debug/tile_lines --window 10 || true"
 
 sim_logs: compose_up
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
@@ -340,20 +326,11 @@ sim_lk_detached: compose_up
 			--ros-args \
 			-r __ns:=/orca_auv \
 			-p publish_debug_image:=true \
-			-p publish_hough_debug_image:=true \
 			-p image_topic:=camera/bottom/image_raw"
 
-sim_rqt_lk: compose_up
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		export XDG_RUNTIME_DIR=/tmp/runtime-root; \
-		mkdir -p \$$XDG_RUNTIME_DIR; \
-		chmod 700 \$$XDG_RUNTIME_DIR; \
-		export LIBGL_ALWAYS_SOFTWARE=1; \
-		export QT_X11_NO_MITSHM=1; \
-		rqt_image_view /orca_auv/camera/bottom/debug/lk_tracks"
+sim_rqt_lk: sim_rqt_tile_lines
 
-sim_rqt_hough: compose_up
+sim_rqt_tile_lines: compose_up
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		export XDG_RUNTIME_DIR=/tmp/runtime-root; \
@@ -361,4 +338,4 @@ sim_rqt_hough: compose_up
 		chmod 700 \$$XDG_RUNTIME_DIR; \
 		export LIBGL_ALWAYS_SOFTWARE=1; \
 		export QT_X11_NO_MITSHM=1; \
-		rqt_image_view /orca_auv/camera/bottom/debug/hough_lines"
+		rqt_image_view /orca_auv/camera/bottom/debug/tile_lines"
