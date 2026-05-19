@@ -75,6 +75,31 @@
             gap: 8px 10px;
             align-items: center;
         }
+        .current-readout {
+            color: var(--muted);
+            font-size: 14px;
+        }
+        .pid-panel-row {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 16px;
+        }
+        .control-panel-row {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.35fr) minmax(360px, 1fr);
+            gap: 16px;
+            align-items: start;
+        }
+        .pid-axis-panel {
+            min-width: 0;
+        }
+        .pid-axis-title {
+            color: var(--muted);
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
         .thruster-pwm-grid {
             display: grid;
             grid-template-columns: minmax(220px, 1fr) minmax(150px, 220px) minmax(220px, 1fr);
@@ -156,6 +181,25 @@
             }
             .thruster-numbering {
                 min-height: auto;
+            }
+        }
+        @media (max-width: 1180px) {
+            .control-panel-row {
+                grid-template-columns: 1fr;
+            }
+            .pid-panel-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .pid-axis-panel:last-child {
+                grid-column: 1 / -1;
+            }
+        }
+        @media (max-width: 820px) {
+            .pid-panel-row {
+                grid-template-columns: 1fr;
+            }
+            .pid-axis-panel:last-child {
+                grid-column: auto;
             }
         }
         .layout {
@@ -242,92 +286,160 @@
     </div>
 
     <div class="layout">
-        <div class="panel">
-            <div class="row">
-                <button onclick="flash_stm32_button_onclick()">flash_stm32</button>
-                <div>flash_stm32_status: <i id="flash_stm32_status">idle</i></div>
+        <div class="control-panel-row">
+            <div class="panel">
+                <div class="row">
+                    <button onclick="flash_stm32_button_onclick()">flash_stm32</button>
+                    <div>flash_stm32_status: <i id="flash_stm32_status">idle</i></div>
+                </div>
+                <div class="row">
+                    <div>diagnostics/stm32/log:</div>
+                    <button onclick="clear_stm32_log_button_onclick()">clear</button>
+                </div>
+                <pre id="stm32_debug_log" style="max-height: 220px; overflow: auto; margin: 8px 0 0;"></pre>
             </div>
-            <div class="row">
-                <div>diagnostics/stm32/log:</div>
-                <button onclick="clear_stm32_log_button_onclick()">clear</button>
-            </div>
-            <pre id="stm32_debug_log" style="max-height: 220px; overflow: auto; margin: 8px 0 0;"></pre>
-        </div>
 
-        <div class="panel">
-            <p>xy control:</p>
-            <div class="row">
-                <div>bottom_camera_hold</div>
-                <button onclick="enable_bottom_camera_pid_fbc()">on</button>
-                <button onclick="disable_bottom_camera_pid_fbc()">off</button>
-                <button onclick="reset_bottom_camera_pid_fbc()">reset</button>
-            </div>
-            <div class="grid-3">
-                <label class="inline-field">x px <input type="number" step="any" id="move_to_point_x_px_input" value="0"></label>
-                <label class="inline-field">y px <input type="number" step="any" id="move_to_point_y_px_input" value="0"></label>
-                <label class="inline-field">speed px/s <input type="number" step="any" min="0" id="move_to_point_speed_px_s_input" value="20"></label>
-            </div>
-            <div class="row">
-                <button onclick="move_to_point_button_onclick()">move</button>
-                <button onclick="cancel_move_to_point_button_onclick()">cancel</button>
-                <div>move status: <i id="move_to_point_status">idle</i></div>
-            </div>
-            <div class="row">
-                <label class="inline-field">yaw rad <input type="number" step="any" id="bottom_camera_yaw_target_rad_input" value="0"></label>
-                <button onclick="set_bottom_camera_yaw_target_rad_button_onclick()">set yaw rad</button>
-                <label class="inline-field">yaw deg <input type="number" step="any" id="bottom_camera_yaw_target_deg_input" value="0"></label>
-                <button onclick="set_bottom_camera_yaw_target_deg_button_onclick()">set yaw deg</button>
-            </div>
-            <div class="grid-2">
-                <div title="control/pid/bottom_camera/x/reference_px">PID x ref px: <i id="bottom_camera_pid_x_reference_px">none</i></div>
-                <div title="control/pid/bottom_camera/y/reference_px">PID y ref px: <i id="bottom_camera_pid_y_reference_px">none</i></div>
-                <div title="control/targets/bottom_camera/yaw_rad">yaw target rad: <i id="bottom_camera_yaw_target_rad">none</i></div>
-                <div title="control/pid/bottom_camera/yaw/reference_rad">PID yaw ref rad: <i id="bottom_camera_pid_yaw_reference_rad">none</i></div>
-                <div title="control/pid/bottom_camera/x/feedback_px">PID x feedback px: <i id="bottom_camera_pid_x_feedback_px">none</i></div>
-                <div title="control/pid/bottom_camera/y/feedback_px">PID y feedback px: <i id="bottom_camera_pid_y_feedback_px">none</i></div>
-                <div class="nowrap-readout" title="state/bottom_camera/yaw_rad">PID yaw feedback rad: <i id="bottom_camera_pid_yaw_feedback_rad">none</i></div>
-            </div>
-            <div class="grid-2">
-                <div title="camera/bottom/pose_px">tile-line pose hz: <i id="bottom_camera_pose_hz">none</i></div>
-                <div title="state/bottom_camera/yaw_rad">yaw topic hz: <i id="bottom_camera_yaw_hz">none</i></div>
-                <div title="camera/bottom/image_raw">image raw hz: <i id="bottom_camera_image_raw_hz">none</i></div>
-                <div title="camera/bottom/image_raw">image size: <i id="bottom_camera_image_size">none</i></div>
-            </div>
-            <div class="row">
-                <button onclick="reset_bottom_camera_pose_button_onclick()">reset PID feedback/ref</button>
-                <div>reset feedback status: <i id="bottom_camera_pose_reset_status">idle</i></div>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div>sensors/depth_m: <i id="pressure_sensor_depth_m">none</i></div>
-            <div class="row">
-                <div>control/targets/depth_m:</div>
-                <input type="number" id="target_depth_m_input">
-                <button onclick="set_target_depth_m_button_onclick()">set</button>
-            </div>
-            <div class="row">
-                <div>depth_hold</div>
-                <button onclick="enable_depth_control()">on</button>
-                <button onclick="disable_depth_control()">off</button>
-                <button onclick="reset_depth_control()">reset</button>
-            </div>
-            <div>
-                <div style="margin-bottom: 8px;">depth PID params:</div>
+            <div class="panel">
+                <p>xy control:</p>
+                <div class="row">
+                    <div>bottom_camera_hold</div>
+                    <button onclick="enable_bottom_camera_pid_fbc()">on</button>
+                    <button onclick="disable_bottom_camera_pid_fbc()">off</button>
+                    <button onclick="reset_bottom_camera_pid_fbc()">reset</button>
+                </div>
+                <div class="grid-3">
+                    <label class="inline-field">x px <input type="number" step="any" id="move_to_point_x_px_input" value="0"></label>
+                    <label class="inline-field">y px <input type="number" step="any" id="move_to_point_y_px_input" value="0"></label>
+                    <label class="inline-field">speed px/s <input type="number" step="any" min="0" id="move_to_point_speed_px_s_input" value="20"></label>
+                </div>
+                <div class="row">
+                    <button onclick="move_to_point_button_onclick()">move</button>
+                    <button onclick="cancel_move_to_point_button_onclick()">cancel</button>
+                    <div>move status: <i id="move_to_point_status">idle</i></div>
+                </div>
+                <div class="row">
+                    <label class="inline-field">yaw rad <input type="number" step="any" id="bottom_camera_yaw_target_rad_input" value="0"></label>
+                    <button onclick="set_bottom_camera_yaw_target_rad_button_onclick()">set yaw rad</button>
+                    <label class="inline-field">yaw deg <input type="number" step="any" id="bottom_camera_yaw_target_deg_input" value="0"></label>
+                    <button onclick="set_bottom_camera_yaw_target_deg_button_onclick()">set yaw deg</button>
+                </div>
                 <div class="grid-2">
-                    <div class="inline-field">P: <input type="number" step="any" id="depth_pid_p_input"></div>
-                    <div class="inline-field">I: <input type="number" step="any" id="depth_pid_i_input"></div>
-                    <div class="inline-field">D: <input type="number" step="any" id="depth_pid_d_input"></div>
-                    <div class="inline-field">smoothing: <input type="number" step="any" id="depth_pid_smoothing_input"></div>
+                    <div title="control/pid/bottom_camera/x/reference_px">PID x ref px: <i id="bottom_camera_pid_x_reference_px">none</i></div>
+                    <div title="control/pid/bottom_camera/y/reference_px">PID y ref px: <i id="bottom_camera_pid_y_reference_px">none</i></div>
+                    <div title="control/targets/bottom_camera/yaw_rad">yaw target rad: <i id="bottom_camera_yaw_target_rad">none</i></div>
+                    <div title="control/pid/bottom_camera/yaw/reference_rad">PID yaw ref rad: <i id="bottom_camera_pid_yaw_reference_rad">none</i></div>
+                    <div title="control/pid/bottom_camera/x/feedback_px">PID x feedback px: <i id="bottom_camera_pid_x_feedback_px">none</i></div>
+                    <div title="control/pid/bottom_camera/y/feedback_px">PID y feedback px: <i id="bottom_camera_pid_y_feedback_px">none</i></div>
+                    <div class="nowrap-readout" title="state/bottom_camera/yaw_rad">PID yaw feedback rad: <i id="bottom_camera_pid_yaw_feedback_rad">none</i></div>
+                </div>
+                <div class="grid-2">
+                    <div title="camera/bottom/pose_px">tile-line pose hz: <i id="bottom_camera_pose_hz">none</i></div>
+                    <div title="state/bottom_camera/yaw_rad">yaw topic hz: <i id="bottom_camera_yaw_hz">none</i></div>
+                    <div title="camera/bottom/image_raw">image raw hz: <i id="bottom_camera_image_raw_hz">none</i></div>
+                    <div title="camera/bottom/image_raw">image size: <i id="bottom_camera_image_size">none</i></div>
+                </div>
+                <div class="row">
+                    <button onclick="reset_bottom_camera_pose_button_onclick()">reset PID feedback/ref</button>
+                    <div>reset feedback status: <i id="bottom_camera_pose_reset_status">idle</i></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div>sensors/depth_m: <i id="pressure_sensor_depth_m">none</i></div>
+                <div class="row">
+                    <div>control/targets/depth_m:</div>
+                    <input type="number" id="target_depth_m_input">
+                    <button onclick="set_target_depth_m_button_onclick()">set</button>
+                </div>
+                <div class="current-readout">current: <i id="target_depth_m_current">none</i></div>
+                <div class="row">
+                    <div>depth_hold</div>
+                    <button onclick="enable_depth_control()">on</button>
+                    <button onclick="disable_depth_control()">off</button>
+                    <button onclick="reset_depth_control()">reset</button>
+                </div>
+                <div>
+                    <div style="margin-bottom: 8px;">depth PID params:</div>
+                    <div class="grid-2">
+                        <div class="inline-field">P: <input type="number" step="any" id="depth_pid_p_input"></div>
+                        <div class="inline-field">I: <input type="number" step="any" id="depth_pid_i_input"></div>
+                        <div class="inline-field">D: <input type="number" step="any" id="depth_pid_d_input"></div>
+                        <div class="inline-field">smoothing: <input type="number" step="any" id="depth_pid_smoothing_input"></div>
+                    </div>
+                    <div class="grid-2 current-readout" style="margin-top: 8px;">
+                        <div>P current: <i id="depth_pid_p_current">none</i></div>
+                        <div>I current: <i id="depth_pid_i_current">none</i></div>
+                        <div>D current: <i id="depth_pid_d_current">none</i></div>
+                        <div>smoothing current: <i id="depth_pid_smoothing_current">none</i></div>
+                    </div>
+                    <div class="row" style="margin-top: 8px;">
+                        <button onclick="set_depth_pid_params_button_onclick()">set PID params</button>
+                    </div>
+                </div>
+                <div class="inline-field">
+                    constant sink force (N):
+                    <input type="number" id="constant_sink_force_N_input">
+                    <button onclick="set_constant_sink_force_button_onclick()">set</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="pid-panel-row">
+            <div class="panel pid-axis-panel">
+                <div class="pid-axis-title">bottom camera PID x axis</div>
+                <div class="grid-2">
+                    <div class="inline-field">P: <input type="number" step="any" id="bottom_camera_x_pid_p_input"></div>
+                    <div class="inline-field">I: <input type="number" step="any" id="bottom_camera_x_pid_i_input"></div>
+                    <div class="inline-field">D: <input type="number" step="any" id="bottom_camera_x_pid_d_input"></div>
+                    <div class="inline-field">smoothing: <input type="number" step="any" id="bottom_camera_x_pid_smoothing_input"></div>
+                </div>
+                <div class="grid-2 current-readout" style="margin-top: 8px;">
+                    <div>P current: <i id="bottom_camera_x_pid_p_current">none</i></div>
+                    <div>I current: <i id="bottom_camera_x_pid_i_current">none</i></div>
+                    <div>D current: <i id="bottom_camera_x_pid_d_current">none</i></div>
+                    <div>smoothing current: <i id="bottom_camera_x_pid_smoothing_current">none</i></div>
                 </div>
                 <div class="row" style="margin-top: 8px;">
-                    <button onclick="set_depth_pid_params_button_onclick()">set PID params</button>
+                    <button onclick="set_bottom_camera_pid_params_button_onclick('x')">set x PID</button>
                 </div>
             </div>
-            <div class="inline-field">
-                constant sink force (N):
-                <input type="number" id="constant_sink_force_N_input">
-                <button onclick="set_constant_sink_force_button_onclick()">set</button>
+
+            <div class="panel pid-axis-panel">
+                <div class="pid-axis-title">bottom camera PID y axis</div>
+                <div class="grid-2">
+                    <div class="inline-field">P: <input type="number" step="any" id="bottom_camera_y_pid_p_input"></div>
+                    <div class="inline-field">I: <input type="number" step="any" id="bottom_camera_y_pid_i_input"></div>
+                    <div class="inline-field">D: <input type="number" step="any" id="bottom_camera_y_pid_d_input"></div>
+                    <div class="inline-field">smoothing: <input type="number" step="any" id="bottom_camera_y_pid_smoothing_input"></div>
+                </div>
+                <div class="grid-2 current-readout" style="margin-top: 8px;">
+                    <div>P current: <i id="bottom_camera_y_pid_p_current">none</i></div>
+                    <div>I current: <i id="bottom_camera_y_pid_i_current">none</i></div>
+                    <div>D current: <i id="bottom_camera_y_pid_d_current">none</i></div>
+                    <div>smoothing current: <i id="bottom_camera_y_pid_smoothing_current">none</i></div>
+                </div>
+                <div class="row" style="margin-top: 8px;">
+                    <button onclick="set_bottom_camera_pid_params_button_onclick('y')">set y PID</button>
+                </div>
+            </div>
+
+            <div class="panel pid-axis-panel">
+                <div class="pid-axis-title">bottom camera PID yaw axis</div>
+                <div class="grid-2">
+                    <div class="inline-field">P: <input type="number" step="any" id="bottom_camera_yaw_pid_p_input"></div>
+                    <div class="inline-field">I: <input type="number" step="any" id="bottom_camera_yaw_pid_i_input"></div>
+                    <div class="inline-field">D: <input type="number" step="any" id="bottom_camera_yaw_pid_d_input"></div>
+                    <div class="inline-field">smoothing: <input type="number" step="any" id="bottom_camera_yaw_pid_smoothing_input"></div>
+                </div>
+                <div class="grid-2 current-readout" style="margin-top: 8px;">
+                    <div>P current: <i id="bottom_camera_yaw_pid_p_current">none</i></div>
+                    <div>I current: <i id="bottom_camera_yaw_pid_i_current">none</i></div>
+                    <div>D current: <i id="bottom_camera_yaw_pid_d_current">none</i></div>
+                    <div>smoothing current: <i id="bottom_camera_yaw_pid_smoothing_current">none</i></div>
+                </div>
+                <div class="row" style="margin-top: 8px;">
+                    <button onclick="set_bottom_camera_pid_params_button_onclick('yaw')">set yaw PID</button>
+                </div>
             </div>
         </div>
 

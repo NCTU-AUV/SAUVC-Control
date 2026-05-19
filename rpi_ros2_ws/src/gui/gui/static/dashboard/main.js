@@ -37,6 +37,45 @@ function formatOptionalDisplayNumber(value, decimalPlaces) {
     return formatted ?? "none";
 }
 
+function setReadoutText(elementId, value, decimalPlaces = 3) {
+    const element = document.getElementById(elementId);
+    if (!element) {
+        return;
+    }
+    if (!Number.isFinite(value)) {
+        element.innerHTML = "none";
+        return;
+    }
+    element.innerHTML = formatDisplayNumber(value, decimalPlaces);
+}
+
+function syncNumberInputIfIdle(elementId, value) {
+    const element = document.getElementById(elementId);
+    if (!element || document.activeElement === element || !Number.isFinite(value)) {
+        return;
+    }
+    element.value = String(value);
+}
+
+function syncPidParamDisplay(prefix, params) {
+    if (!params) {
+        return;
+    }
+
+    const fieldMappings = [
+        ["proportional_gain", "p"],
+        ["integral_gain", "i"],
+        ["derivative_gain", "d"],
+        ["derivative_smoothing_factor", "smoothing"],
+    ];
+
+    fieldMappings.forEach(([paramName, fieldKey]) => {
+        const value = Number(params[paramName]);
+        setReadoutText(`${prefix}_${fieldKey}_current`, value, 3);
+        syncNumberInputIfIdle(`${prefix}_${fieldKey}_input`, value);
+    });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     const element = document.getElementById("stm32_debug_log");
     if (!element) {
@@ -60,6 +99,20 @@ websocket.onmessage = (event) => {
                 msg_json_object.data.msg,
                 3
             );
+        }
+        if (msg_json_object.data.topic_name == protocol.topics.targetDepthM) {
+            const targetDepth = Number(msg_json_object.data.msg);
+            setReadoutText("target_depth_m_current", targetDepth, 3);
+            syncNumberInputIfIdle("target_depth_m_input", targetDepth);
+        }
+        if (msg_json_object.data.topic_name == protocol.topics.depthPidParams) {
+            syncPidParamDisplay("depth_pid", msg_json_object.data.msg || {});
+        }
+        if (msg_json_object.data.topic_name == protocol.topics.bottomCameraPidParams) {
+            const paramsByAxis = msg_json_object.data.msg || {};
+            ["x", "y", "yaw"].forEach((axis) => {
+                syncPidParamDisplay(`bottom_camera_${axis}_pid`, paramsByAxis[axis]);
+            });
         }
         if (msg_json_object.data.topic_name == protocol.topics.thrustersPwmUs) {
             const pwmValues = msg_json_object.data.msg || [];
@@ -320,6 +373,28 @@ function set_depth_pid_params_button_onclick() {
         protocol.controllerActions.setPidParams,
         {
             params: {
+                proportional_gain: p,
+                integral_gain: i,
+                derivative_gain: d,
+                derivative_smoothing_factor: smoothing,
+            }
+        }
+    )));
+}
+
+function set_bottom_camera_pid_params_button_onclick(axis) {
+    const prefix = `bottom_camera_${axis}_pid`;
+    const p = document.getElementById(`${prefix}_p_input`).value;
+    const i = document.getElementById(`${prefix}_i_input`).value;
+    const d = document.getElementById(`${prefix}_d_input`).value;
+    const smoothing = document.getElementById(`${prefix}_smoothing_input`).value;
+
+    websocket.send(JSON.stringify(protocol.makeControllerMessage(
+        protocol.controllerGroups.bottomCameraPidFbc,
+        protocol.controllerActions.setPidParams,
+        {
+            params: {
+                axis: axis,
                 proportional_gain: p,
                 integral_gain: i,
                 derivative_gain: d,
