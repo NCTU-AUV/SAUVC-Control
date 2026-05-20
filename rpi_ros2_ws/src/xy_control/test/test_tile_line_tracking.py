@@ -7,6 +7,8 @@ from xy_control.lk_total_transform_node import LineMatch
 from xy_control.lk_total_transform_node import LineTrack
 from xy_control.lk_total_transform_node import LkTotalTransformNode
 from xy_control.lk_total_transform_node import TileLine
+from xy_control.lk_total_transform_node import TileLineDetection
+from xy_control.lk_total_transform_node import VisualMotion
 
 
 class _Response:
@@ -108,6 +110,29 @@ def test_line_deltas_solve_xy_translation():
     assert translation[1] == pytest.approx(4.0)
 
 
+def test_min_line_length_scales_with_detection_width():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._min_line_length_px = 45.0
+    node._auto_scale_min_line_length = True
+    node._min_line_length_reference_width_px = 320.0
+
+    assert LkTotalTransformNode._effective_min_line_length_px(
+        node,
+        320,
+    ) == pytest.approx(45.0)
+    assert LkTotalTransformNode._effective_min_line_length_px(
+        node,
+        160,
+    ) == pytest.approx(22.5)
+
+    node._auto_scale_min_line_length = False
+
+    assert LkTotalTransformNode._effective_min_line_length_px(
+        node,
+        160,
+    ) == pytest.approx(45.0)
+
+
 def test_update_track_family_confirms_matched_tracks():
     node = LkTotalTransformNode.__new__(LkTotalTransformNode)
     node._track_confirm_frames = 2
@@ -137,6 +162,184 @@ def test_update_track_family_confirms_matched_tracks():
     assert tracks[0].missed_count == 0
 
 
+def test_tracking_confidence_requires_both_line_families_for_stride():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._min_confirmed_tracks_for_stride = 2
+    node._min_tracking_confidence_for_stride = 0.5
+    node._horizontal_tracks = [
+        LineTrack(pos=1.0, angle_offset=0.0, confidence=1.0, confirmed=True),
+    ]
+    node._vertical_tracks = []
+
+    assert LkTotalTransformNode._tracking_ready_for_stride(node) is False
+
+    node._vertical_tracks = [
+        LineTrack(
+            pos=2.0,
+            angle_offset=math.pi / 2.0,
+            confidence=1.0,
+            confirmed=True,
+        ),
+    ]
+
+    assert LkTotalTransformNode._tracking_ready_for_stride(node) is True
+    assert LkTotalTransformNode._tracking_confidence(node) == pytest.approx(1.0)
+
+
+def test_stride_detection_skips_only_when_visual_motion_and_tracks_are_ready():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._tile_detection_stride = 3
+    node._recovery_detection_remaining = 0
+    node._visual_only_frame_count = 0
+    node._max_visual_only_frames = 3
+    node._image_frame_count = 4
+    node._min_confirmed_tracks_for_stride = 2
+    node._min_tracking_confidence_for_stride = 0.5
+    node._horizontal_tracks = [
+        LineTrack(pos=1.0, angle_offset=0.0, confidence=1.0, confirmed=True),
+    ]
+    node._vertical_tracks = [
+        LineTrack(
+            pos=2.0,
+            angle_offset=math.pi / 2.0,
+            confidence=1.0,
+            confirmed=True,
+        ),
+    ]
+    visual_motion = object()
+
+    assert LkTotalTransformNode._should_detect_tile_lines(node, None) is True
+    assert LkTotalTransformNode._should_detect_tile_lines(
+        node,
+        visual_motion,
+    ) is False
+
+    node._image_frame_count = 6
+
+    assert LkTotalTransformNode._should_detect_tile_lines(
+        node,
+        visual_motion,
+    ) is True
+
+
+def test_visual_prediction_advances_line_tracks_between_detections():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._have_grid_orientation = True
+    node._horizontal_family_dir = 0.0
+    node._horizontal_tracks = [
+        LineTrack(pos=1.0, angle_offset=0.0, confidence=1.0, confirmed=True),
+    ]
+    node._vertical_tracks = [
+        LineTrack(
+            pos=2.0,
+            angle_offset=math.pi / 2.0,
+            confidence=1.0,
+            confirmed=True,
+        ),
+    ]
+
+    LkTotalTransformNode._predict_tracks_from_visual_motion(
+        node,
+        np.array([3.0, 4.0], dtype=np.float64),
+        rotation_rad=0.1,
+    )
+
+    assert node._horizontal_tracks[0].pos == pytest.approx(5.0)
+    assert node._vertical_tracks[0].pos == pytest.approx(-1.0)
+    assert node._horizontal_tracks[0].angle_offset == pytest.approx(0.1)
+    assert node._vertical_tracks[0].angle_offset == pytest.approx(
+        math.pi / 2.0 + 0.1,
+    )
+
+
+def test_yaw_fusion_blends_line_and_visual_rotation_by_confidence():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._yaw_line_matches_full_confidence = 6.0
+    node._yaw_visual_inliers_full_confidence = 80.0
+    node._yaw_line_blend_min_weight = 0.25
+    node._yaw_line_blend_max_weight = 0.85
+    node._min_confirmed_tracks_for_stride = 2
+    node._horizontal_tracks = [
+        LineTrack(pos=1.0, angle_offset=0.0, confidence=1.0, confirmed=True),
+    ]
+    node._vertical_tracks = [
+        LineTrack(
+            pos=2.0,
+            angle_offset=math.pi / 2.0,
+            confidence=1.0,
+            confirmed=True,
+        ),
+    ]
+    visual_motion = VisualMotion(
+        tx=0.0,
+        ty=0.0,
+        rot=0.0,
+        scale=1.0,
+        inliers=80,
+    )
+
+    rot = LkTotalTransformNode._fuse_yaw_rotation(
+        node,
+        line_rot=0.10,
+        match_count=6,
+        visual_motion=visual_motion,
+    )
+
+    assert rot == pytest.approx(0.05)
+
+
+def test_grid_yaw_correction_slowly_removes_residual_yaw():
+    node = LkTotalTransformNode.__new__(LkTotalTransformNode)
+    node._grid_yaw_anchor_min_matches = 4
+    node._grid_yaw_anchor_min_confidence = 0.75
+    node._grid_yaw_correction_gain = 0.10
+    node._grid_yaw_correction_max_rad = 0.015
+    node._grid_yaw_correction_gate_rad = 0.25
+    node._grid_yaw_deadband_rad = 0.005
+    node._grid_yaw_anchor_ready = True
+    node._grid_yaw_anchor_angle = 0.0
+    node._grid_yaw_anchor_pose_yaw = 0.0
+    node._yaw_basis_sign = 1.0
+    node._min_confirmed_tracks_for_stride = 2
+    node._horizontal_tracks = [
+        LineTrack(pos=1.0, angle_offset=0.0, confidence=1.0, confirmed=True),
+    ]
+    node._vertical_tracks = [
+        LineTrack(
+            pos=2.0,
+            angle_offset=math.pi / 2.0,
+            confidence=1.0,
+            confirmed=True,
+        ),
+    ]
+    node._total_raw = np.eye(3, dtype=np.float64)
+    node._total_comp = LkTotalTransformNode._yaw_matrix(0.07)
+    node._total_comp[0, 2] = 5.0
+    node._total_comp[1, 2] = -3.0
+    detection = TileLineDetection(
+        horizontal=[],
+        vertical=[],
+        segments=np.empty((0, 4), dtype=np.int32),
+        horizontal_normal=np.array([0.0, 1.0], dtype=np.float64),
+        vertical_normal=np.array([1.0, 0.0], dtype=np.float64),
+        horizontal_dir=0.0,
+    )
+
+    correction = LkTotalTransformNode._maybe_apply_grid_yaw_correction(
+        node,
+        detection,
+        match_count=6,
+    )
+    _, _, corrected_yaw, _ = LkTotalTransformNode._extract_similarity(
+        node._total_comp,
+    )
+
+    assert correction == pytest.approx(-0.007)
+    assert corrected_yaw == pytest.approx(0.063)
+    assert node._total_comp[0, 2] == pytest.approx(5.0)
+    assert node._total_comp[1, 2] == pytest.approx(-3.0)
+
+
 def test_reset_pose_clears_tile_line_state_and_publishes_zero():
     node = LkTotalTransformNode.__new__(LkTotalTransformNode)
     node._prev_gray = np.ones((2, 2), dtype=np.uint8)
@@ -159,6 +362,14 @@ def test_reset_pose_clears_tile_line_state_and_publishes_zero():
     node._last_scene_yaw = 0.5
     node._have_grid_orientation = True
     node._horizontal_family_dir = 0.2
+    node._image_frame_count = 10
+    node._visual_only_frame_count = 2
+    node._consecutive_detection_failures = 3
+    node._recovery_detection_frames = 5
+    node._recovery_detection_remaining = 0
+    node._grid_yaw_anchor_ready = True
+    node._grid_yaw_anchor_angle = 0.1
+    node._grid_yaw_anchor_pose_yaw = 0.2
     publish_calls = []
     node._publish = lambda: publish_calls.append(True)
     node.get_logger = lambda: _Logger()
@@ -174,4 +385,11 @@ def test_reset_pose_clears_tile_line_state_and_publishes_zero():
     assert np.allclose(node._total_raw, np.eye(3))
     assert np.allclose(node._total_comp, np.eye(3))
     assert node._have_grid_orientation is False
+    assert node._image_frame_count == 0
+    assert node._visual_only_frame_count == 0
+    assert node._consecutive_detection_failures == 0
+    assert node._recovery_detection_remaining == 5
+    assert node._grid_yaw_anchor_ready is False
+    assert node._grid_yaw_anchor_angle == 0.0
+    assert node._grid_yaw_anchor_pose_yaw == 0.0
     assert publish_calls == [True]

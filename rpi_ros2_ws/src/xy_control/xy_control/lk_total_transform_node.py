@@ -36,6 +36,7 @@ class TileLineDetection:
     segments: np.ndarray
     horizontal_normal: np.ndarray
     vertical_normal: np.ndarray
+    horizontal_dir: float
 
 
 @dataclass
@@ -108,6 +109,8 @@ class LkTotalTransformNode(Node):
         self.declare_parameter('canny_threshold2', 160.0)
         self.declare_parameter('hough_threshold', 45)
         self.declare_parameter('min_line_length_px', 45.0)
+        self.declare_parameter('auto_scale_min_line_length', True)
+        self.declare_parameter('min_line_length_reference_width_px', 320.0)
         self.declare_parameter('max_line_gap_px', 12.0)
         self.declare_parameter('axis_angle_tolerance_deg', 25.0)
         self.declare_parameter('use_dynamic_grid_angles', True)
@@ -120,6 +123,21 @@ class LkTotalTransformNode(Node):
         self.declare_parameter('motion_outlier_threshold_px', 12.0)
         self.declare_parameter('min_confirmed_line_matches', 2)
         self.declare_parameter('reinit_if_fail', True)
+        self.declare_parameter('tile_detection_stride', 2)
+        self.declare_parameter('recovery_detection_frames', 5)
+        self.declare_parameter('min_confirmed_tracks_for_stride', 2)
+        self.declare_parameter('min_tracking_confidence_for_stride', 0.5)
+        self.declare_parameter('max_visual_only_frames', 3)
+        self.declare_parameter('yaw_visual_inliers_full_confidence', 80)
+        self.declare_parameter('yaw_line_matches_full_confidence', 6)
+        self.declare_parameter('yaw_line_blend_min_weight', 0.25)
+        self.declare_parameter('yaw_line_blend_max_weight', 0.85)
+        self.declare_parameter('grid_yaw_anchor_min_confidence', 0.75)
+        self.declare_parameter('grid_yaw_anchor_min_matches', 4)
+        self.declare_parameter('grid_yaw_correction_gain', 0.10)
+        self.declare_parameter('grid_yaw_correction_max_rad', 0.015)
+        self.declare_parameter('grid_yaw_correction_gate_rad', 0.25)
+        self.declare_parameter('grid_yaw_deadband_rad', 0.005)
 
         # ---- Params (visual feature tracking for yaw continuity) ----
         self.declare_parameter('use_visual_feature_tracking', True)
@@ -159,6 +177,7 @@ class LkTotalTransformNode(Node):
         flip_y = bool(self.get_parameter('flip_image_y').value)
         self._image_to_body = self._build_mapping_matrix(yaw_deg, flip_x, flip_y)
         self._body_to_image = np.linalg.inv(self._image_to_body)
+        self._yaw_basis_sign = 1.0 if np.linalg.det(self._image_to_body) >= 0.0 else -1.0
 
         self._resize_width_px = int(self.get_parameter('resize_width_px').value)
         self._blur_kernel_size = int(self.get_parameter('blur_kernel_size').value)
@@ -166,6 +185,13 @@ class LkTotalTransformNode(Node):
         self._canny_threshold2 = float(self.get_parameter('canny_threshold2').value)
         self._hough_threshold = int(self.get_parameter('hough_threshold').value)
         self._min_line_length_px = float(self.get_parameter('min_line_length_px').value)
+        self._auto_scale_min_line_length = bool(
+            self.get_parameter('auto_scale_min_line_length').value
+        )
+        self._min_line_length_reference_width_px = max(
+            1.0,
+            float(self.get_parameter('min_line_length_reference_width_px').value),
+        )
         self._max_line_gap_px = float(self.get_parameter('max_line_gap_px').value)
         self._axis_angle_tolerance = math.radians(
             float(self.get_parameter('axis_angle_tolerance_deg').value)
@@ -186,6 +212,68 @@ class LkTotalTransformNode(Node):
             self.get_parameter('min_confirmed_line_matches').value
         )
         self._reinit_if_fail = bool(self.get_parameter('reinit_if_fail').value)
+        self._tile_detection_stride = max(
+            1,
+            int(self.get_parameter('tile_detection_stride').value),
+        )
+        self._recovery_detection_frames = max(
+            0,
+            int(self.get_parameter('recovery_detection_frames').value),
+        )
+        self._min_confirmed_tracks_for_stride = max(
+            1,
+            int(self.get_parameter('min_confirmed_tracks_for_stride').value),
+        )
+        self._min_tracking_confidence_for_stride = float(
+            self.get_parameter('min_tracking_confidence_for_stride').value
+        )
+        self._max_visual_only_frames = max(
+            1,
+            int(self.get_parameter('max_visual_only_frames').value),
+        )
+        self._yaw_visual_inliers_full_confidence = max(
+            1.0,
+            float(self.get_parameter('yaw_visual_inliers_full_confidence').value),
+        )
+        self._yaw_line_matches_full_confidence = max(
+            1.0,
+            float(self.get_parameter('yaw_line_matches_full_confidence').value),
+        )
+        self._yaw_line_blend_min_weight = self._clamp(
+            float(self.get_parameter('yaw_line_blend_min_weight').value),
+            0.0,
+            1.0,
+        )
+        self._yaw_line_blend_max_weight = self._clamp(
+            float(self.get_parameter('yaw_line_blend_max_weight').value),
+            self._yaw_line_blend_min_weight,
+            1.0,
+        )
+        self._grid_yaw_anchor_min_confidence = self._clamp(
+            float(self.get_parameter('grid_yaw_anchor_min_confidence').value),
+            0.0,
+            1.0,
+        )
+        self._grid_yaw_anchor_min_matches = max(
+            1,
+            int(self.get_parameter('grid_yaw_anchor_min_matches').value),
+        )
+        self._grid_yaw_correction_gain = max(
+            0.0,
+            float(self.get_parameter('grid_yaw_correction_gain').value),
+        )
+        self._grid_yaw_correction_max_rad = max(
+            0.0,
+            float(self.get_parameter('grid_yaw_correction_max_rad').value),
+        )
+        self._grid_yaw_correction_gate_rad = max(
+            0.0,
+            float(self.get_parameter('grid_yaw_correction_gate_rad').value),
+        )
+        self._grid_yaw_deadband_rad = max(
+            0.0,
+            float(self.get_parameter('grid_yaw_deadband_rad').value),
+        )
 
         self._use_visual_feature_tracking = bool(
             self.get_parameter('use_visual_feature_tracking').value
@@ -226,6 +314,13 @@ class LkTotalTransformNode(Node):
         self._horizontal_family_dir = 0.0
         self._prev_gray: Optional[np.ndarray] = None
         self._prev_pts: Optional[np.ndarray] = None
+        self._image_frame_count = 0
+        self._visual_only_frame_count = 0
+        self._consecutive_detection_failures = 0
+        self._recovery_detection_remaining = self._recovery_detection_frames
+        self._grid_yaw_anchor_ready = False
+        self._grid_yaw_anchor_angle = 0.0
+        self._grid_yaw_anchor_pose_yaw = 0.0
 
         # running totals (vehicle pose in world frame)
         self._total_raw = np.eye(3, dtype=np.float64)
@@ -266,7 +361,8 @@ class LkTotalTransformNode(Node):
             f'rotation_center_mode={self._rotation_center_mode}, '
             f'publish_raw={self._publish_raw_output}\n'
             f'scalar outputs: x={self._output_x_topic}, y={self._output_y_topic}, '
-            f'yaw={self._output_yaw_topic}, scale={self._output_scale_topic}'
+            f'yaw={self._output_yaw_topic}, scale={self._output_scale_topic}, '
+            f'tile_detection_stride={self._tile_detection_stride}'
         )
 
     def _on_camerainfo(self, msg: CameraInfo):
@@ -278,6 +374,29 @@ class LkTotalTransformNode(Node):
                 self._pp_cx = cx
                 self._pp_cy = cy
                 self._have_pp = True
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return max(lower, min(upper, value))
+
+    @staticmethod
+    def _wrap_pi(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    @classmethod
+    def _angle_blend(cls, base: float, target: float, target_weight: float) -> float:
+        weight = cls._clamp(target_weight, 0.0, 1.0)
+        return base + weight * cls._wrap_pi(target - base)
+
+    @staticmethod
+    def _yaw_matrix(yaw: float) -> np.ndarray:
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+        return np.array([
+            [cos_yaw, -sin_yaw, 0.0],
+            [sin_yaw, cos_yaw, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
 
     def _to_bgr(self, msg: Image) -> Optional[np.ndarray]:
         try:
@@ -295,6 +414,14 @@ class LkTotalTransformNode(Node):
         new_h = max(1, int(round(h * scale)))
         small = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
         return small, scale
+
+    def _effective_min_line_length_px(self, image_width_px: int) -> float:
+        if not self._auto_scale_min_line_length:
+            return self._min_line_length_px
+
+        scale = max(1.0, float(image_width_px))
+        scale /= self._min_line_length_reference_width_px
+        return max(1.0, self._min_line_length_px * scale)
 
     def _detect_features(self, gray_small: np.ndarray) -> Optional[np.ndarray]:
         pts = cv2.goodFeaturesToTrack(
@@ -419,6 +546,13 @@ class LkTotalTransformNode(Node):
     def _on_reset_pose(self, request, response):
         self._prev_gray = None
         self._prev_pts = None
+        self._image_frame_count = 0
+        self._visual_only_frame_count = 0
+        self._consecutive_detection_failures = 0
+        self._recovery_detection_remaining = self._recovery_detection_frames
+        self._grid_yaw_anchor_ready = False
+        self._grid_yaw_anchor_angle = 0.0
+        self._grid_yaw_anchor_pose_yaw = 0.0
         self._total_raw = np.eye(3, dtype=np.float64)
         self._total_comp = np.eye(3, dtype=np.float64)
         self._reset_line_tracks()
@@ -443,20 +577,21 @@ class LkTotalTransformNode(Node):
                 blur_size += 1
             gray_eq = cv2.GaussianBlur(gray_eq, (blur_size, blur_size), 0)
 
+        h, w = gray_small.shape[:2]
+        min_line_length_px = self._effective_min_line_length_px(w)
         edges = cv2.Canny(gray_eq, self._canny_threshold1, self._canny_threshold2)
         lines = cv2.HoughLinesP(
             edges,
             rho=1.0,
             theta=np.pi / 180.0,
             threshold=self._hough_threshold,
-            minLineLength=self._min_line_length_px,
+            minLineLength=min_line_length_px,
             maxLineGap=self._max_line_gap_px,
         )
 
         if lines is None:
             return None
 
-        h, w = gray_small.shape[:2]
         center = np.array([0.5 * float(w), 0.5 * float(h)], dtype=np.float64)
         horizontal_obs = []
         vertical_obs = []
@@ -520,6 +655,7 @@ class LkTotalTransformNode(Node):
             segments=segments,
             horizontal_normal=horizontal_normal,
             vertical_normal=vertical_normal,
+            horizontal_dir=horizontal_dir,
         )
 
     def _cluster_lines(self, observations) -> List[TileLine]:
@@ -675,6 +811,155 @@ class LkTotalTransformNode(Node):
         self._last_scene_translation_small = translation
         self._last_scene_yaw = rot
         return tx, ty, rot, inlier_count
+
+    def _confirmed_track_counts(self) -> Tuple[int, int]:
+        horizontal_count = sum(
+            1 for track in self._horizontal_tracks
+            if track.confirmed and track.confidence > 0.0
+        )
+        vertical_count = sum(
+            1 for track in self._vertical_tracks
+            if track.confirmed and track.confidence > 0.0
+        )
+        return horizontal_count, vertical_count
+
+    def _tracking_confidence(self) -> float:
+        confirmed_tracks = [
+            track
+            for track in self._horizontal_tracks + self._vertical_tracks
+            if track.confirmed and track.confidence > 0.0
+        ]
+        if not confirmed_tracks:
+            return 0.0
+
+        horizontal_count, vertical_count = self._confirmed_track_counts()
+        family_score = 1.0 if horizontal_count > 0 and vertical_count > 0 else 0.5
+        count_score = min(
+            1.0,
+            len(confirmed_tracks) / float(self._min_confirmed_tracks_for_stride),
+        )
+        confidence = sum(track.confidence for track in confirmed_tracks)
+        confidence /= float(len(confirmed_tracks))
+        return max(0.0, min(1.0, confidence * count_score * family_score))
+
+    def _tracking_ready_for_stride(self) -> bool:
+        horizontal_count, vertical_count = self._confirmed_track_counts()
+        if horizontal_count == 0 or vertical_count == 0:
+            return False
+        if horizontal_count + vertical_count < self._min_confirmed_tracks_for_stride:
+            return False
+        return self._tracking_confidence() >= self._min_tracking_confidence_for_stride
+
+    def _should_detect_tile_lines(
+        self,
+        visual_motion: Optional[VisualMotion],
+    ) -> bool:
+        if self._tile_detection_stride <= 1:
+            return True
+        if self._recovery_detection_remaining > 0:
+            return True
+        if visual_motion is None:
+            return True
+        if self._visual_only_frame_count >= self._max_visual_only_frames:
+            return True
+        if not self._tracking_ready_for_stride():
+            return True
+        return self._image_frame_count % self._tile_detection_stride == 0
+
+    def _note_detection_success(self):
+        self._consecutive_detection_failures = 0
+        self._visual_only_frame_count = 0
+        if self._recovery_detection_remaining > 0:
+            self._recovery_detection_remaining -= 1
+
+    def _note_detection_failure(self):
+        self._consecutive_detection_failures += 1
+        self._visual_only_frame_count = 0
+        self._recovery_detection_remaining = max(
+            self._recovery_detection_remaining,
+            self._recovery_detection_frames,
+        )
+
+    def _line_yaw_confidence(self, match_count: int) -> float:
+        match_score = self._clamp(
+            float(match_count) / self._yaw_line_matches_full_confidence,
+            0.0,
+            1.0,
+        )
+        return match_score * self._tracking_confidence()
+
+    def _fuse_yaw_rotation(
+        self,
+        line_rot: float,
+        match_count: int,
+        visual_motion: Optional[VisualMotion],
+    ) -> float:
+        if visual_motion is None:
+            return line_rot
+
+        line_confidence = self._line_yaw_confidence(match_count)
+        if line_confidence <= 0.0:
+            return visual_motion.rot
+
+        visual_confidence = self._clamp(
+            float(visual_motion.inliers) / self._yaw_visual_inliers_full_confidence,
+            0.0,
+            1.0,
+        )
+        line_weight = line_confidence / (line_confidence + visual_confidence + 1e-6)
+        line_weight = self._clamp(
+            line_weight,
+            self._yaw_line_blend_min_weight,
+            self._yaw_line_blend_max_weight,
+        )
+        return self._angle_blend(visual_motion.rot, line_rot, line_weight)
+
+    def _grid_yaw_measurement_ready(self, match_count: int) -> bool:
+        if match_count < self._grid_yaw_anchor_min_matches:
+            return False
+        horizontal_count, vertical_count = self._confirmed_track_counts()
+        if horizontal_count == 0 or vertical_count == 0:
+            return False
+        return self._tracking_confidence() >= self._grid_yaw_anchor_min_confidence
+
+    def _maybe_apply_grid_yaw_correction(
+        self,
+        detection: TileLineDetection,
+        match_count: int,
+    ) -> float:
+        if not self._grid_yaw_measurement_ready(match_count):
+            return 0.0
+
+        _, _, pose_yaw, _ = self._extract_similarity(self._total_comp)
+        if not self._grid_yaw_anchor_ready:
+            self._grid_yaw_anchor_angle = detection.horizontal_dir
+            self._grid_yaw_anchor_pose_yaw = pose_yaw
+            self._grid_yaw_anchor_ready = True
+            return 0.0
+
+        scene_grid_delta = self._line_angle_diff(
+            detection.horizontal_dir,
+            self._grid_yaw_anchor_angle,
+        )
+        target_yaw = (
+            self._grid_yaw_anchor_pose_yaw
+            - self._yaw_basis_sign * scene_grid_delta
+        )
+        yaw_error = self._wrap_pi(target_yaw - pose_yaw)
+        if abs(yaw_error) > self._grid_yaw_correction_gate_rad:
+            return 0.0
+        if abs(yaw_error) < self._grid_yaw_deadband_rad:
+            return 0.0
+
+        correction = self._clamp(
+            self._grid_yaw_correction_gain * yaw_error,
+            -self._grid_yaw_correction_max_rad,
+            self._grid_yaw_correction_max_rad,
+        )
+        correction_matrix = self._yaw_matrix(correction)
+        self._total_raw = self._total_raw @ correction_matrix
+        self._total_comp = self._total_comp @ correction_matrix
+        return correction
 
     def _match_track_family(
         self,
@@ -844,6 +1129,41 @@ class LkTotalTransformNode(Node):
         self._mark_track_family_missed(self._vertical_tracks, 0.0)
         self._mark_track_family_missed(self._horizontal_tracks, 0.0)
 
+    def _predict_tracks_from_visual_motion(
+        self,
+        translation_small: Optional[np.ndarray],
+        rotation_rad: float,
+    ):
+        if translation_small is None or not self._have_grid_orientation:
+            return
+
+        horizontal_normal = self._line_normal(self._horizontal_family_dir)
+        vertical_dir = (self._horizontal_family_dir + 0.5 * math.pi) % math.pi
+        vertical_normal = self._line_normal(vertical_dir)
+        horizontal_delta = float(horizontal_normal @ translation_small)
+        vertical_delta = float(vertical_normal @ translation_small)
+        self._predict_track_family(
+            self._horizontal_tracks,
+            horizontal_delta,
+            rotation_rad,
+        )
+        self._predict_track_family(
+            self._vertical_tracks,
+            vertical_delta,
+            rotation_rad,
+        )
+
+    @staticmethod
+    def _predict_track_family(
+        tracks: List[LineTrack],
+        scene_delta: float,
+        angle_delta: float,
+    ):
+        for track in tracks:
+            track.pos += scene_delta
+            track.angle_offset = (track.angle_offset + angle_delta) % math.pi
+            track.age += 1
+
     def _mark_track_family_missed(self, tracks: List[LineTrack], scene_delta: float):
         for track in tracks:
             track.pos += scene_delta
@@ -864,6 +1184,9 @@ class LkTotalTransformNode(Node):
         self._last_scene_yaw = 0.0
         self._have_grid_orientation = False
         self._horizontal_family_dir = 0.0
+        if hasattr(self, '_recovery_detection_frames'):
+            self._visual_only_frame_count = 0
+            self._recovery_detection_remaining = self._recovery_detection_frames
 
     @staticmethod
     def _line_angle_diff(angle: float, reference: float) -> float:
@@ -904,6 +1227,7 @@ class LkTotalTransformNode(Node):
         return 0.5 * float(w), 0.5 * float(h)
 
     def _on_image(self, msg: Image):
+        self._image_frame_count += 1
         frame_bgr = self._to_bgr(msg)
         if frame_bgr is None:
             return
@@ -922,27 +1246,34 @@ class LkTotalTransformNode(Node):
                 0.5 * float(w_small),
                 0.5 * float(h_small),
             )
-        curr_lines = self._detect_tile_lines(gray_small)
+        should_detect_lines = self._should_detect_tile_lines(visual_motion)
+        curr_lines = None
         line_motion = None
 
-        if curr_lines is None:
-            self.get_logger().warn(
-                'No tile lines detected in bottom camera image.',
-                throttle_duration_sec=5.0,
-            )
-            self._mark_tracks_missed()
-        else:
-            line_motion = self._estimate_scene_motion_from_tracks(curr_lines)
+        if should_detect_lines:
+            curr_lines = self._detect_tile_lines(gray_small)
+            if curr_lines is None:
+                self.get_logger().warn(
+                    'No tile lines detected in bottom camera image.',
+                    throttle_duration_sec=5.0,
+                )
+                self._mark_tracks_missed()
+                self._note_detection_failure()
+            else:
+                line_motion = self._estimate_scene_motion_from_tracks(curr_lines)
 
-        if line_motion is None and curr_lines is not None:
-            self.get_logger().warn(
-                'Insufficient confirmed tile-line tracks for transform.',
-                throttle_duration_sec=5.0,
-            )
+            if line_motion is None and curr_lines is not None:
+                self.get_logger().warn(
+                    'Insufficient confirmed tile-line tracks for transform.',
+                    throttle_duration_sec=5.0,
+                )
+                self._note_detection_failure()
+            elif line_motion is not None:
+                self._note_detection_success()
 
         if line_motion is not None:
             tx, ty, line_rot, match_count = line_motion
-            rot = visual_motion.rot if visual_motion is not None else line_rot
+            rot = self._fuse_yaw_rotation(line_rot, match_count, visual_motion)
             source = 'hybrid' if visual_motion is not None else 'tile_lines'
         elif visual_motion is not None:
             tx = visual_motion.tx
@@ -954,6 +1285,12 @@ class LkTotalTransformNode(Node):
             self._last_scene_ty_small = float(visual_translation_small[1])
             self._last_scene_translation_small = visual_translation_small
             self._last_scene_yaw = rot
+            if not should_detect_lines:
+                self._predict_tracks_from_visual_motion(
+                    visual_translation_small,
+                    rot,
+                )
+                self._visual_only_frame_count += 1
         else:
             if self._publish_debug_image and curr_lines is not None:
                 self._publish_debug(frame_bgr, curr_lines, scale_factor)
@@ -1002,10 +1339,17 @@ class LkTotalTransformNode(Node):
         # Accumulate vehicle pose in world frame (world origin is the first frame)
         self._total_raw = self._total_raw @ H_motion_raw_body
         self._total_comp = self._total_comp @ H_motion_comp_body
+        yaw_correction = 0.0
+        if line_motion is not None and curr_lines is not None:
+            yaw_correction = self._maybe_apply_grid_yaw_correction(
+                curr_lines,
+                match_count,
+            )
 
         self.get_logger().debug(
             f'{source} transform: matches={match_count}, scene_tx={tx:.2f}, '
-            f'scene_ty={ty:.2f}, scene_yaw={rot:.4f}'
+            f'scene_ty={ty:.2f}, scene_yaw={rot:.4f}, '
+            f'yaw_correction={yaw_correction:.4f}'
         )
 
         # Publish totals
