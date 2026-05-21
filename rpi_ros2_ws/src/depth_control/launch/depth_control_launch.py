@@ -24,9 +24,9 @@ def generate_launch_description():
                 ('control/pid/output', 'control/pid/depth/sink_force_N'),
             ],
             parameters=[{
-                'proportional_gain': 30.0,
-                'integral_gain': 2.0,
-                'derivative_gain': 30.0,
+                'proportional_gain': 40.0,
+                'integral_gain': 3.0,
+                'derivative_gain': 12.0,
                 'derivative_smoothing_factor': 0.0,
             }],
         ),
@@ -34,6 +34,9 @@ def generate_launch_description():
             package='depth_control',
             namespace=namespace,
             executable='output_sink_force_to_output_wrench_node',
+            parameters=[{
+                'depth_force_bias_N': 20.0,
+            }],
             remappings=[
                 ('control/wrench_command', 'control/wrench_sources/depth'),
             ],
