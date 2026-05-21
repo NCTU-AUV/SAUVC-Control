@@ -66,7 +66,7 @@ class VisualMotion:
     inliers: int
 
 
-class LkTotalTransformNode(Node):
+class BottomCameraOdometryNode(Node):
     """
     Subscribe:
       - image_topic (sensor_msgs/Image)
@@ -94,7 +94,7 @@ class LkTotalTransformNode(Node):
     """
 
     def __init__(self):
-        super().__init__('lk_total_transform_node')
+        super().__init__('bottom_camera_odometry_node')
 
         # ---- Params (topics) ----
         self.declare_parameter('image_topic', 'camera/bottom/image_raw')
@@ -1008,7 +1008,7 @@ class LkTotalTransformNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = LkTotalTransformNode()
+    node = BottomCameraOdometryNode()
     try:
         rclpy.spin(node)
     finally:

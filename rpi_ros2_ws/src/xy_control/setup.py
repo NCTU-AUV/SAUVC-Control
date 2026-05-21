@@ -28,7 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bottom_camera_pid_bridge_node = xy_control.bottom_camera_pid_bridge_node:main',
-            'lk_total_transform_node = xy_control.lk_total_transform_node:main',
+            'bottom_camera_odometry_node = xy_control.bottom_camera_odometry_node:main',
             'waypoint_target_publisher = xy_control.waypoint_target_publisher:main',
             'yaw_reference_unwrapper_node = xy_control.yaw_reference_unwrapper_node:main',
         ],
