@@ -43,10 +43,10 @@ class DiveThenForwardMissionNode(Node):
         # =========================
 
         # Target depth in meters.
-        self.declare_parameter("target_depth_m", 0.1)
+        self.declare_parameter("target_depth_m", 0.6)
 
         # Allowed depth error before we consider the AUV to have reached target depth.
-        self.declare_parameter("depth_tolerance_m", 0.03)
+        self.declare_parameter("depth_tolerance_m", 0.05)
 
         # Depth must stay within tolerance for this long before moving forward.
         self.declare_parameter("depth_stable_time_s", 2.0)
@@ -70,7 +70,7 @@ class DiveThenForwardMissionNode(Node):
         self.declare_parameter("speed_px_s", 50.0)
 
         # Final surfaced depth target after returning to the startup XY point.
-        self.declare_parameter("surface_depth_m", 0.0)
+        self.declare_parameter("surface_depth_m", 0.2)
 
         # Mission loop period.
         self.declare_parameter("control_period_s", 0.1)

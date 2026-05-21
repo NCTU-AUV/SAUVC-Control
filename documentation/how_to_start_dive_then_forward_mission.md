@@ -145,3 +145,47 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv
 ```
+
+## Wi-Fi Safe Detached Hardware Start
+
+When starting the real vehicle over Wi-Fi, do not run the mission in an
+interactive SSH shell. Start both the bringup stack and the mission detached on
+the Raspberry Pi so the mission process is not tied to the SSH/Wi-Fi session.
+
+Run on the Raspberry Pi:
+
+```bash
+cd ~/SAUVC-RPI
+make launch_detached
+make mission_dive_detached
+```
+
+Follow bringup logs:
+
+```bash
+make launch_logs
+```
+
+Follow mission logs:
+
+```bash
+make mission_dive_logs
+```
+
+Check whether the detached mission is still running:
+
+```bash
+make mission_dive_status
+```
+
+Stop the mission and request `SAFE_DISABLED`:
+
+```bash
+make mission_dive_stop
+```
+
+Extra ROS parameters can be passed with `MISSION_ARGS`:
+
+```bash
+make mission_dive_detached MISSION_ARGS="-p target_depth_m:=0.6 -p speed_px_s:=80.0"
+```

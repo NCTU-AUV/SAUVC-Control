@@ -35,8 +35,12 @@ ROS_DOMAIN_ID ?= 0
 ROS_LOCALHOST_ONLY ?= 0
 RMW_IMPLEMENTATION ?= rmw_fastrtps_cpp
 ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST_ONLY) RMW_IMPLEMENTATION=$(RMW_IMPLEMENTATION)
+BRINGUP_LOG ?= /tmp/orca_bringup.log
+MISSION_NAMESPACE ?= /orca_auv
+MISSION_LOG ?= /tmp/dive_then_forward_mission.log
+MISSION_ARGS ?=
 
-.PHONY: all debug compose_up compose_down compose_build compose_shell init launch launch_debug launch_detached compose_init compose_launch compose_launch_detached compose_clean clean update_image
+.PHONY: all debug compose_up compose_start compose_down compose_build compose_shell init launch launch_debug launch_detached launch_logs mission_dive_detached mission_dive_status mission_dive_logs mission_dive_stop compose_init compose_launch compose_launch_detached compose_clean clean update_image
 
 all: init launch
 
@@ -72,6 +76,10 @@ compose_down:
 compose_build:
 	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) build --pull
 
+compose_start:
+	@echo "Starting compose stack without rebuilding"
+	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) up -d --no-build
+
 compose_shell:
 	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
 		source /opt/ros/humble/setup.bash; \
@@ -106,12 +114,57 @@ launch_debug: compose_up
 
 launch_detached: compose_up
 	@echo "Launching ROS stack in detached mode"
-	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
+	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T -d orca /bin/bash -lc "\
 		cd $(WORKSPACE) && \
 		source /opt/ros/humble/setup.bash && \
 		source /root/uros_ws/install/local_setup.bash && \
 		source install/setup.bash && \
-		ros2 launch src/launch/orca_bringup.launch.py"
+		rm -f $(BRINGUP_LOG); \
+		echo \"Starting orca_bringup at \$$(date -Is)\" > $(BRINGUP_LOG); \
+		exec ros2 launch src/launch/orca_bringup.launch.py >> $(BRINGUP_LOG) 2>&1"
+
+launch_logs: compose_start
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		tail -n 200 -f $(BRINGUP_LOG)"
+
+mission_dive_detached: compose_start
+	@echo "Starting dive-then-forward mission in detached mode"
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		pkill -f '[d]ive_then_forward_mission_node' || true"
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T -d orca /bin/bash -lc "\
+		$(ROS_SETUP) \
+		rm -f $(MISSION_LOG); \
+		echo \"Starting dive_then_forward_mission_node at \$$(date -Is)\" > $(MISSION_LOG); \
+		exec ros2 run xy_control dive_then_forward_mission_node \
+			--ros-args \
+			-r __ns:=$(MISSION_NAMESPACE) \
+			$(MISSION_ARGS) \
+			>> $(MISSION_LOG) 2>&1"
+	@echo "Mission process requested. Follow logs with: make mission_dive_logs"
+
+mission_dive_status: compose_start
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) \
+		echo '--- Mission process ---'; \
+		ps -eo pid,ppid,tty,stat,cmd | grep -E '[d]ive_then_forward_mission_node' || true; \
+		echo ''; \
+		echo '--- Mission node ---'; \
+		ros2 node list 2>/dev/null | grep -E '^$(MISSION_NAMESPACE)/dive_then_forward_mission_node$$' || true; \
+		echo ''; \
+		echo '--- Supervisor ---'; \
+		timeout 3s ros2 topic echo --once $(MISSION_NAMESPACE)/system_manager/mode std_msgs/msg/String || true; \
+		timeout 3s ros2 topic echo --once $(MISSION_NAMESPACE)/system_manager/status std_msgs/msg/String || true"
+
+mission_dive_logs: compose_start
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		tail -n 200 -f $(MISSION_LOG)"
+
+mission_dive_stop: compose_start
+	@echo "Stopping dive-then-forward mission and requesting SAFE_DISABLED"
+	-@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) \
+		pkill -f '[d]ive_then_forward_mission_node' || true; \
+		timeout 5s ros2 service call $(MISSION_NAMESPACE)/system_manager/set_mode/safe_disabled std_srvs/srv/Trigger '{}' || true"
 
 compose_init: init
 
