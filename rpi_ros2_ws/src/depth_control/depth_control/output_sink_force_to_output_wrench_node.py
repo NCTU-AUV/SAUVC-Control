@@ -29,7 +29,7 @@ class OutputSinkForceToOutputWrenchNode(Node):
 
         self._orientation_quaternion = Quaternion(1, 0, 0, 0)
         self.declare_parameter('use_sink_force_direction', False)
-        self.declare_parameter('depth_force_bias_N', 0.0)
+        self.declare_parameter('depth_force_bias_N', 5.0)
 
     def _orientation_subscription_callback(self, msg):
         self._orientation_quaternion = Quaternion(msg.w, msg.x, msg.y, msg.z)

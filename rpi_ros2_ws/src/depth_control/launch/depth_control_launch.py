@@ -35,7 +35,7 @@ def generate_launch_description():
             namespace=namespace,
             executable='output_sink_force_to_output_wrench_node',
             parameters=[{
-                'depth_force_bias_N': 20.0,
+                'depth_force_bias_N': 10.0,
             }],
             remappings=[
                 ('control/wrench_command', 'control/wrench_sources/depth'),
