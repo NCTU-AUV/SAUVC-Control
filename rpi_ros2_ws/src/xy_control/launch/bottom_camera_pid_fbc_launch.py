@@ -54,9 +54,9 @@ def generate_launch_description():
             ('control/pid/output', 'control/pid/bottom_camera/yaw/torque_Nm'),
         ],
         parameters=[{
-            'proportional_gain': 2,
+            'proportional_gain': 2.0,
             'integral_gain': 0.0,
-            'derivative_gain': 0.08,
+            'derivative_gain': 0.1,
             'derivative_smoothing_factor': 0.2,
         }],
     )
