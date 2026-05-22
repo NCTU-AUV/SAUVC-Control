@@ -70,16 +70,18 @@ ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv
 The default mission behavior is:
 
 - reset bottom-camera pose feedback and MoveToPoint setpoint to zero
+- reset controllers through `system_manager/reset_controllers` before enabling `depth_hold`
 - enable `depth_hold`
 - enable `bottom_camera_hold`
 - use the current bottom-camera XY feedback as the origin
 - latch the startup bottom-camera yaw feedback and keep that heading while diving
 - keep the startup bottom-camera X/Y position while diving
-- dive to `0.1 m`
-- move to `(startup_x + 1000 px, startup_y)` while holding `0.1 m`
-- rotate in place to `startup_yaw + 180 deg`
-- move back to `(startup_x, startup_y)` while holding `0.1 m`
-- surface to `0.0 m`
+- dive to `0.6 m`
+- move to `(startup_x + 4000 px, startup_y)` while holding `0.6 m`
+- hold the forward endpoint until bottom-camera XY feedback stays within tolerance for `1.0 s`
+- rotate in place to `startup_yaw + 180 deg` in staged yaw steps, advancing each step when its target is crossed
+- move back to `(startup_x, startup_y)` while holding `0.6 m`
+- disable `depth_hold` after returning instead of commanding a surface depth target
 
 ### 6. Stop the mission node
 
@@ -107,10 +109,16 @@ You can also adjust motion speed:
 ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv -p target_x_px:=200.0 -p speed_px_s:=80.0
 ```
 
-To adjust the surfacing target or the turn amount:
+To adjust the turn amount or staged turn size:
 
 ```bash
-ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv -p surface_depth_m:=0.0 -p turn_yaw_offset_rad:=3.141592653589793
+ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv -p turn_yaw_offset_rad:=3.141592653589793 -p turn_step_rad:=0.7853981633974483
+```
+
+To adjust the forward hold stabilization before turning:
+
+```bash
+ros2 run xy_control dive_then_forward_mission_node --ros-args -r __ns:=/orca_auv -p forward_hold_tolerance_px:=25.0 -p forward_hold_stable_time_s:=1.0
 ```
 
 ## One-Line Alternative

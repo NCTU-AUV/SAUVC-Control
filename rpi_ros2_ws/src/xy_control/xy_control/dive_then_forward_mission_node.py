@@ -17,6 +17,7 @@ class MissionState(Enum):
     CALL_RESET_BOTTOM_CAMERA_POSE = auto()
     CALL_RESET_MOVE_TO_POINT = auto()
     WAIT_STARTUP_FEEDBACK = auto()
+    CALL_RESET_CONTROLLERS = auto()
     CALL_DEPTH_HOLD = auto()
     WAIT_TRIGGER_RESULT = auto()
     WAIT_REACH_DEPTH = auto()
@@ -25,9 +26,10 @@ class MissionState(Enum):
     SEND_MOVE_GOAL = auto()
     WAIT_GOAL_ACCEPT = auto()
     MOVING = auto()
+    WAIT_FORWARD_HOLD_STABLE = auto()
     PREPARE_TURN = auto()
     WAIT_REACH_TURN_YAW = auto()
-    WAIT_REACH_SURFACE = auto()
+    CALL_DISABLE_DEPTH_HOLD = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -46,30 +48,40 @@ class DiveThenForwardMissionNode(Node):
         self.declare_parameter("target_depth_m", 0.6)
 
         # Allowed depth error before we consider the AUV to have reached target depth.
-        self.declare_parameter("depth_tolerance_m", 0.05)
+        self.declare_parameter("depth_tolerance_m", 0.1)
 
         # Depth must stay within tolerance for this long before moving forward.
         self.declare_parameter("depth_stable_time_s", 2.0)
 
         # Move relative to the current bottom-camera XY feedback.
-        # Forward direction is +X, so the default target is current x + 1000.
-        self.declare_parameter("target_x_px", 1000.0)
+        # Forward direction is +X.
+        self.declare_parameter("target_x_px", 4000.0)
         self.declare_parameter("target_y_px", 0.0)
 
         # The yaw target is latched from the first bottom-camera yaw feedback.
         # This keeps the startup heading instead of forcing a fixed yaw angle.
         self.declare_parameter("turn_yaw_offset_rad", math.pi)
 
+        # Maximum yaw target increment during the turn.
+        self.declare_parameter("turn_step_rad", math.pi / 4.0)
+
         # Only used for warning logs. The controller itself still tries to correct yaw.
         self.declare_parameter("yaw_tolerance_rad", 0.10)
 
-        # Turn yaw must stay within tolerance for this long before returning.
+        # Kept for compatibility with existing commands. Staged turns advance
+        # once each yaw step target is crossed.
         self.declare_parameter("yaw_stable_time_s", 1.0)
 
         # Speed of waypoint setpoint generation in px/s.
-        self.declare_parameter("speed_px_s", 50.0)
+        self.declare_parameter("speed_px_s", 200.0)
 
-        # Final surfaced depth target after returning to the startup XY point.
+        # Forward target must stay within XY tolerance before turning.
+        self.declare_parameter("forward_hold_tolerance_px", 25.0)
+        self.declare_parameter("forward_hold_stable_time_s", 1.0)
+        self.declare_parameter("max_forward_hold_wait_s", 30.0)
+
+        # Deprecated compatibility parameter. The mission now disables depth hold
+        # after returning instead of commanding a surfaced depth target.
         self.declare_parameter("surface_depth_m", 0.2)
 
         # Mission loop period.
@@ -92,14 +104,26 @@ class DiveThenForwardMissionNode(Node):
         self.target_y_px = float(self.get_parameter("target_y_px").value)
 
         self.turn_yaw_offset_rad = float(self.get_parameter("turn_yaw_offset_rad").value)
+        self.turn_step_rad = float(self.get_parameter("turn_step_rad").value)
+        if not math.isfinite(self.turn_step_rad) or self.turn_step_rad <= 0.0:
+            self.get_logger().warn(
+                "turn_step_rad must be finite and > 0. Using pi/4 rad."
+            )
+            self.turn_step_rad = math.pi / 4.0
         self.target_yaw_rad = None
         self.startup_yaw_rad = None
         self.yaw_tolerance_rad = float(self.get_parameter("yaw_tolerance_rad").value)
-        self.yaw_stable_time_s = float(self.get_parameter("yaw_stable_time_s").value)
 
         self.speed_px_s = float(self.get_parameter("speed_px_s").value)
-        self.surface_depth_m = float(self.get_parameter("surface_depth_m").value)
-
+        self.forward_hold_tolerance_px = float(
+            self.get_parameter("forward_hold_tolerance_px").value
+        )
+        self.forward_hold_stable_time_s = float(
+            self.get_parameter("forward_hold_stable_time_s").value
+        )
+        self.max_forward_hold_wait_s = float(
+            self.get_parameter("max_forward_hold_wait_s").value
+        )
         self.control_period_s = float(self.get_parameter("control_period_s").value)
         self.max_depth_wait_s = float(self.get_parameter("max_depth_wait_s").value)
         self.max_move_wait_s = float(self.get_parameter("max_move_wait_s").value)
@@ -171,9 +195,19 @@ class DiveThenForwardMissionNode(Node):
         # Supervisor services
         # =========================
 
+        self.reset_controllers_client = self.create_client(
+            Trigger,
+            "system_manager/reset_controllers",
+        )
+
         self.depth_hold_client = self.create_client(
             Trigger,
             "system_manager/set_mode/depth_hold",
+        )
+
+        self.disable_depth_hold_client = self.create_client(
+            Trigger,
+            "system_manager/disable/depth_hold",
         )
 
         self.bottom_camera_hold_client = self.create_client(
@@ -220,7 +254,9 @@ class DiveThenForwardMissionNode(Node):
         self.active_depth_target_m = self.target_depth_m
 
         self.depth_reached_since_s = None
-        self.yaw_reached_since_s = None
+        self.forward_hold_reached_since_s = None
+        self.turn_step_targets_rad = []
+        self.turn_step_index = 0
 
         self.pending_trigger_future = None
         self.pending_trigger_name = ""
@@ -242,7 +278,9 @@ class DiveThenForwardMissionNode(Node):
             f"dive depth = {self.target_depth_m:.3f} m, "
             f"forward offset = ({self.target_x_px:.1f}, {self.target_y_px:.1f}) px, "
             f"turn yaw offset = {self.turn_yaw_offset_rad:.3f} rad, "
-            f"surface depth = {self.surface_depth_m:.3f} m, "
+            f"turn step = {self.turn_step_rad:.3f} rad, "
+            f"forward hold tolerance = {self.forward_hold_tolerance_px:.1f} px, "
+            "return action = disable depth hold, "
             f"speed = {self.speed_px_s:.1f} px/s"
         )
 
@@ -311,6 +349,13 @@ class DiveThenForwardMissionNode(Node):
         elif self.state == MissionState.WAIT_STARTUP_FEEDBACK:
             self._tick_wait_startup_feedback()
 
+        elif self.state == MissionState.CALL_RESET_CONTROLLERS:
+            self._call_trigger_service(
+                client=self.reset_controllers_client,
+                service_name="reset_controllers",
+                next_state=MissionState.CALL_DEPTH_HOLD,
+            )
+
         elif self.state == MissionState.CALL_DEPTH_HOLD:
             self._call_trigger_service(
                 client=self.depth_hold_client,
@@ -344,14 +389,21 @@ class DiveThenForwardMissionNode(Node):
         elif self.state == MissionState.MOVING:
             self._tick_moving()
 
+        elif self.state == MissionState.WAIT_FORWARD_HOLD_STABLE:
+            self._tick_wait_forward_hold_stable()
+
         elif self.state == MissionState.PREPARE_TURN:
             self._tick_prepare_turn()
 
         elif self.state == MissionState.WAIT_REACH_TURN_YAW:
             self._tick_wait_reach_turn_yaw()
 
-        elif self.state == MissionState.WAIT_REACH_SURFACE:
-            self._tick_wait_reach_surface()
+        elif self.state == MissionState.CALL_DISABLE_DEPTH_HOLD:
+            self._call_trigger_service(
+                client=self.disable_depth_hold_client,
+                service_name="disable_depth_hold",
+                next_state=MissionState.DONE,
+            )
 
         elif self.state == MissionState.DONE:
             # Mission finished successfully.
@@ -387,9 +439,23 @@ class DiveThenForwardMissionNode(Node):
             )
             return
 
+        if not self.reset_controllers_client.service_is_ready():
+            self.get_logger().info(
+                "Waiting for system_manager/reset_controllers service...",
+                throttle_duration_sec=2.0,
+            )
+            return
+
         if not self.depth_hold_client.service_is_ready():
             self.get_logger().info(
                 "Waiting for system_manager/set_mode/depth_hold service...",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        if not self.disable_depth_hold_client.service_is_ready():
+            self.get_logger().info(
+                "Waiting for system_manager/disable/depth_hold service...",
                 throttle_duration_sec=2.0,
             )
             return
@@ -435,7 +501,7 @@ class DiveThenForwardMissionNode(Node):
         self.active_depth_target_m = self.target_depth_m
         self.target_yaw_rad = self.startup_yaw_rad
         self._set_hold_xy_target(self.startup_x_px, self.startup_y_px)
-        self._set_state(MissionState.CALL_DEPTH_HOLD)
+        self._set_state(MissionState.CALL_RESET_CONTROLLERS)
 
     def _tick_wait_reach_depth(self):
         if self.current_depth_m is None:
@@ -475,7 +541,7 @@ class DiveThenForwardMissionNode(Node):
                     name="forward",
                     x_px=self.startup_x_px + self.target_x_px,
                     y_px=self.startup_y_px + self.target_y_px,
-                    next_state=MissionState.PREPARE_TURN,
+                    next_state=MissionState.WAIT_FORWARD_HOLD_STABLE,
                 )
 
         else:
@@ -486,6 +552,57 @@ class DiveThenForwardMissionNode(Node):
                 f"current = {self.current_depth_m:.3f}, "
                 f"target = {self.target_depth_m:.3f}, "
                 f"error = {error:.3f}",
+                throttle_duration_sec=1.0,
+            )
+
+    def _tick_wait_forward_hold_stable(self):
+        if self.hold_x_px is None or self.hold_y_px is None:
+            self._fail("No forward hold target before turning.")
+            return
+
+        if self.current_x_px is None or self.current_y_px is None:
+            self.get_logger().info(
+                "Waiting for bottom-camera XY feedback before turning...",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        if self._time_in_state_s() > self.max_forward_hold_wait_s:
+            error_px = self._xy_error_px(self.hold_x_px, self.hold_y_px)
+            self._fail(
+                "Timeout while waiting for forward hold to stabilize. "
+                f"current = ({self.current_x_px:.1f}, {self.current_y_px:.1f}) px, "
+                f"target = ({self.hold_x_px:.1f}, {self.hold_y_px:.1f}) px, "
+                f"error = {error_px:.1f} px"
+            )
+            return
+
+        error_px = self._xy_error_px(self.hold_x_px, self.hold_y_px)
+
+        if error_px <= self.forward_hold_tolerance_px:
+            if self.forward_hold_reached_since_s is None:
+                self.forward_hold_reached_since_s = self._now_s()
+
+            stable_time_s = self._now_s() - self.forward_hold_reached_since_s
+            self.get_logger().info(
+                "Forward hold is within tolerance. "
+                f"current = ({self.current_x_px:.1f}, {self.current_y_px:.1f}) px, "
+                f"target = ({self.hold_x_px:.1f}, {self.hold_y_px:.1f}) px, "
+                f"error = {error_px:.1f} px, "
+                f"stable_time = {stable_time_s:.1f}s",
+                throttle_duration_sec=1.0,
+            )
+
+            if stable_time_s >= self.forward_hold_stable_time_s:
+                self._set_state(MissionState.PREPARE_TURN)
+
+        else:
+            self.forward_hold_reached_since_s = None
+            self.get_logger().info(
+                "Waiting for forward hold before turning. "
+                f"current = ({self.current_x_px:.1f}, {self.current_y_px:.1f}) px, "
+                f"target = ({self.hold_x_px:.1f}, {self.hold_y_px:.1f}) px, "
+                f"error = {error_px:.1f} px",
                 throttle_duration_sec=1.0,
             )
 
@@ -508,11 +625,21 @@ class DiveThenForwardMissionNode(Node):
         turn_hold_y_px = self.startup_y_px + self.target_y_px
         self._set_hold_xy_target(turn_hold_x_px, turn_hold_y_px)
 
-        self.target_yaw_rad = self.startup_yaw_rad + self.turn_yaw_offset_rad
+        self.turn_step_targets_rad = self._build_turn_step_targets()
+        self.turn_step_index = 0
+
+        if not self.turn_step_targets_rad:
+            self._fail("No turn yaw targets could be generated.")
+            return
+
+        self.target_yaw_rad = self.turn_step_targets_rad[self.turn_step_index]
+        final_target_yaw_rad = self.turn_step_targets_rad[-1]
         self.get_logger().info(
-            "Starting in-place turn. "
+            "Starting staged in-place turn. "
             f"hold_xy = ({turn_hold_x_px:.1f}, {turn_hold_y_px:.1f}) px, "
-            f"target_yaw = {self.target_yaw_rad:.3f} rad"
+            f"step = {self._turn_step_text()}, "
+            f"step_target_yaw = {self.target_yaw_rad:.3f} rad, "
+            f"final_target_yaw = {final_target_yaw_rad:.3f} rad"
         )
         self._set_state(MissionState.WAIT_REACH_TURN_YAW)
 
@@ -530,7 +657,8 @@ class DiveThenForwardMissionNode(Node):
 
         if self._time_in_state_s() > self.max_turn_wait_s:
             self._fail(
-                "Timeout while waiting to complete 180 degree turn. "
+                "Timeout while waiting to complete staged turn. "
+                f"step = {self._turn_step_text()}, "
                 f"current_yaw = {self.current_yaw_rad:.3f}, "
                 f"target_yaw = {self.target_yaw_rad:.3f}"
             )
@@ -538,83 +666,33 @@ class DiveThenForwardMissionNode(Node):
 
         yaw_error = self._angle_error(self.target_yaw_rad, self.current_yaw_rad)
 
-        if abs(yaw_error) <= self.yaw_tolerance_rad:
-            if self.yaw_reached_since_s is None:
-                self.yaw_reached_since_s = self._now_s()
-
-            stable_time_s = self._now_s() - self.yaw_reached_since_s
+        if self._has_reached_or_crossed_turn_step(yaw_error):
             self.get_logger().info(
-                "Turn yaw is within tolerance. "
-                f"current = {self.current_yaw_rad:.3f}, "
-                f"target = {self.target_yaw_rad:.3f}, "
-                f"error = {yaw_error:.3f}, "
-                f"stable_time = {stable_time_s:.1f}s",
-                throttle_duration_sec=1.0,
-            )
-
-            if stable_time_s >= self.yaw_stable_time_s:
-                self._start_move_goal(
-                    name="return",
-                    x_px=self.startup_x_px,
-                    y_px=self.startup_y_px,
-                    next_state=MissionState.WAIT_REACH_SURFACE,
-                )
-
-        else:
-            self.yaw_reached_since_s = None
-            self.get_logger().info(
-                "Waiting to complete 180 degree turn. "
+                "Turn yaw step target crossed. "
+                f"step = {self._turn_step_text()}, "
                 f"current = {self.current_yaw_rad:.3f}, "
                 f"target = {self.target_yaw_rad:.3f}, "
                 f"error = {yaw_error:.3f}",
                 throttle_duration_sec=1.0,
             )
 
-    def _tick_wait_reach_surface(self):
-        self.active_depth_target_m = self.surface_depth_m
+            if self._advance_turn_step():
+                return
 
-        if self.current_depth_m is None:
-            self.get_logger().info(
-                "Waiting for depth feedback while surfacing...",
-                throttle_duration_sec=2.0,
+            self._start_move_goal(
+                name="return",
+                x_px=self.startup_x_px,
+                y_px=self.startup_y_px,
+                next_state=MissionState.CALL_DISABLE_DEPTH_HOLD,
             )
-            return
-
-        if self._time_in_state_s() > self.max_depth_wait_s:
-            self._fail(
-                "Timeout while waiting to surface. "
-                f"current_depth = {self.current_depth_m:.3f}, "
-                f"target_depth = {self.surface_depth_m:.3f}"
-            )
-            return
-
-        error = abs(self.current_depth_m - self.surface_depth_m)
-
-        if error <= self.depth_tolerance_m:
-            if self.depth_reached_since_s is None:
-                self.depth_reached_since_s = self._now_s()
-
-            stable_time_s = self._now_s() - self.depth_reached_since_s
-            self.get_logger().info(
-                "Surface depth is within tolerance. "
-                f"current = {self.current_depth_m:.3f}, "
-                f"target = {self.surface_depth_m:.3f}, "
-                f"error = {error:.3f}, "
-                f"stable_time = {stable_time_s:.1f}s",
-                throttle_duration_sec=1.0,
-            )
-
-            if stable_time_s >= self.depth_stable_time_s:
-                self.get_logger().info("Mission completed after surfacing.")
-                self._set_state(MissionState.DONE)
 
         else:
-            self.depth_reached_since_s = None
             self.get_logger().info(
-                "Waiting to surface. "
-                f"current = {self.current_depth_m:.3f}, "
-                f"target = {self.surface_depth_m:.3f}, "
-                f"error = {error:.3f}",
+                "Waiting to cross staged turn target. "
+                f"step = {self._turn_step_text()}, "
+                f"current = {self.current_yaw_rad:.3f}, "
+                f"target = {self.target_yaw_rad:.3f}, "
+                f"error = {yaw_error:.3f}",
                 throttle_duration_sec=1.0,
             )
 
@@ -840,13 +918,6 @@ class DiveThenForwardMissionNode(Node):
                 self._fail("Internal error: MoveToPoint completed without next state.")
                 return
 
-            if next_state == MissionState.WAIT_REACH_SURFACE:
-                self.active_depth_target_m = self.surface_depth_m
-                self.get_logger().info(
-                    "Starting surface sequence. "
-                    f"target_depth = {self.surface_depth_m:.3f} m"
-                )
-
             self._set_state(next_state)
         else:
             self._fail(f"MoveToPoint failed. message = {result.message}")
@@ -891,11 +962,11 @@ class DiveThenForwardMissionNode(Node):
         self.state = new_state
         self.state_start_time_s = self._now_s()
 
-        if new_state in (MissionState.WAIT_REACH_DEPTH, MissionState.WAIT_REACH_SURFACE):
+        if new_state == MissionState.WAIT_REACH_DEPTH:
             self.depth_reached_since_s = None
 
-        if new_state == MissionState.WAIT_REACH_TURN_YAW:
-            self.yaw_reached_since_s = None
+        if new_state == MissionState.WAIT_FORWARD_HOLD_STABLE:
+            self.forward_hold_reached_since_s = None
 
     def _fail(self, reason: str):
         self.get_logger().error(f"Mission failed: {reason}")
@@ -916,6 +987,8 @@ class DiveThenForwardMissionNode(Node):
         self.startup_xy_logged = False
         self.hold_x_px = None
         self.hold_y_px = None
+        self.turn_step_targets_rad = []
+        self.turn_step_index = 0
 
     def _log_startup_xy_if_ready(self):
         if self.startup_xy_logged:
@@ -933,6 +1006,60 @@ class DiveThenForwardMissionNode(Node):
     def _set_hold_xy_target(self, x_px: float, y_px: float):
         self.hold_x_px = float(x_px)
         self.hold_y_px = float(y_px)
+
+    def _xy_error_px(self, target_x_px: float, target_y_px: float) -> float:
+        return math.hypot(
+            self.current_x_px - target_x_px,
+            self.current_y_px - target_y_px,
+        )
+
+    def _build_turn_step_targets(self):
+        if self.startup_yaw_rad is None:
+            return []
+
+        if not math.isfinite(self.turn_yaw_offset_rad):
+            return []
+
+        total_offset_rad = abs(self.turn_yaw_offset_rad)
+        if total_offset_rad <= 1e-9:
+            return [self.startup_yaw_rad]
+
+        step_rad = min(abs(self.turn_step_rad), total_offset_rad)
+        direction = 1.0 if self.turn_yaw_offset_rad >= 0.0 else -1.0
+
+        targets = []
+        next_offset_rad = step_rad
+        while next_offset_rad < total_offset_rad:
+            targets.append(self.startup_yaw_rad + direction * next_offset_rad)
+            next_offset_rad += step_rad
+
+        targets.append(self.startup_yaw_rad + self.turn_yaw_offset_rad)
+        return targets
+
+    def _advance_turn_step(self) -> bool:
+        next_index = self.turn_step_index + 1
+        if next_index >= len(self.turn_step_targets_rad):
+            return False
+
+        self.turn_step_index = next_index
+        self.target_yaw_rad = self.turn_step_targets_rad[self.turn_step_index]
+        self.get_logger().info(
+            "Advancing staged turn target. "
+            f"step = {self._turn_step_text()}, "
+            f"target_yaw = {self.target_yaw_rad:.3f} rad"
+        )
+        return True
+
+    def _has_reached_or_crossed_turn_step(self, yaw_error: float) -> bool:
+        turn_direction = 1.0 if self.turn_yaw_offset_rad >= 0.0 else -1.0
+        return turn_direction * yaw_error <= 0.0
+
+    def _turn_step_text(self) -> str:
+        total_steps = len(self.turn_step_targets_rad)
+        if total_steps <= 0:
+            return "unknown"
+        current_step = min(self.turn_step_index + 1, total_steps)
+        return f"{current_step}/{total_steps}"
 
     @staticmethod
     def _publish_float(pub, value: float):
