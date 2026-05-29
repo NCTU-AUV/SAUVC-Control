@@ -230,8 +230,6 @@ class SupervisorNode(Node):
             return
 
         if not self.get_parameter("auto_initialize_thrusters_on_killed_recovery").value:
-            if self._auto_initialize_thrusters_timer is not None:
-                self._auto_initialize_thrusters_timer.cancel()
             self.get_logger().info("Thruster auto-initialization disabled")
             return
 
@@ -245,8 +243,6 @@ class SupervisorNode(Node):
             return
 
         if self._initialize_all_thrusters_client.service_is_ready():
-            if self._auto_initialize_thrusters_timer is not None:
-                self._auto_initialize_thrusters_timer.cancel()
             self.get_logger().info("Thruster auto-initialization request sent")
             future = self._initialize_all_thrusters_client.call_async(Trigger.Request())
             future.add_done_callback(self._on_initialize_all_thrusters_result)
@@ -255,8 +251,6 @@ class SupervisorNode(Node):
         timeout_s = float(self.get_parameter("thrusters_initialize_service_timeout_s").value)
         if self._age_s(self._auto_initialize_thrusters_start_stamp) > timeout_s:
             self._auto_initialize_thrusters_in_progress = False
-            if self._auto_initialize_thrusters_timer is not None:
-                self._auto_initialize_thrusters_timer.cancel()
             service_name = self.get_parameter("thrusters_initialize_service").value
             status = f"Thruster auto-initialization skipped: {service_name} service not ready"
             self._set_status(status)
