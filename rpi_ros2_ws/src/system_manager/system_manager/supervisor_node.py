@@ -61,8 +61,7 @@ class SupervisorNode(Node):
         self._wrench_sum_active = False
         self._last_killed_state = None
         self._have_killed_state = False
-        self._auto_initialize_thrusters_started = False
-        self._auto_initialize_thrusters_finished = False
+        self._auto_initialize_thrusters_in_progress = False
         self._auto_initialize_thrusters_start_stamp = None
         self._auto_initialize_thrusters_timer = None
 
@@ -227,30 +226,25 @@ class SupervisorNode(Node):
         return response
 
     def _start_auto_initialize_all_thrusters(self):
-        if self._auto_initialize_thrusters_started or self._auto_initialize_thrusters_finished:
+        if self._auto_initialize_thrusters_in_progress:
             return
 
         if not self.get_parameter("auto_initialize_thrusters_on_killed_recovery").value:
-            self._auto_initialize_thrusters_finished = True
             if self._auto_initialize_thrusters_timer is not None:
                 self._auto_initialize_thrusters_timer.cancel()
             self.get_logger().info("Thruster auto-initialization disabled")
             return
 
-        self._auto_initialize_thrusters_started = True
+        self._auto_initialize_thrusters_in_progress = True
         self._auto_initialize_thrusters_start_stamp = self.get_clock().now()
         self._set_status("Thruster auto-initialization started")
         self.get_logger().info("Thruster auto-initialization started")
 
     def _maybe_initialize_all_thrusters(self):
-        if self._auto_initialize_thrusters_finished:
-            return
-
-        if not self._auto_initialize_thrusters_started:
+        if not self._auto_initialize_thrusters_in_progress:
             return
 
         if self._initialize_all_thrusters_client.service_is_ready():
-            self._auto_initialize_thrusters_finished = True
             if self._auto_initialize_thrusters_timer is not None:
                 self._auto_initialize_thrusters_timer.cancel()
             self.get_logger().info("Thruster auto-initialization request sent")
@@ -260,7 +254,7 @@ class SupervisorNode(Node):
 
         timeout_s = float(self.get_parameter("thrusters_initialize_service_timeout_s").value)
         if self._age_s(self._auto_initialize_thrusters_start_stamp) > timeout_s:
-            self._auto_initialize_thrusters_finished = True
+            self._auto_initialize_thrusters_in_progress = False
             if self._auto_initialize_thrusters_timer is not None:
                 self._auto_initialize_thrusters_timer.cancel()
             service_name = self.get_parameter("thrusters_initialize_service").value
@@ -272,12 +266,14 @@ class SupervisorNode(Node):
         try:
             response = future.result()
         except Exception as exc:  # noqa: BLE001
+            self._auto_initialize_thrusters_in_progress = False
             status = f"Thruster auto-initialization failed: {exc}"
             self._set_status(status)
             self.get_logger().warning(status)
             return
 
         if response.success:
+            self._auto_initialize_thrusters_in_progress = False
             status = "Thruster auto-initialization succeeded"
             if response.message:
                 status = f"{status}: {response.message}"
@@ -285,6 +281,7 @@ class SupervisorNode(Node):
             self.get_logger().info(status)
             return
 
+        self._auto_initialize_thrusters_in_progress = False
         status = "Thruster auto-initialization failed"
         if response.message:
             status = f"{status}: {response.message}"
