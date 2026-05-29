@@ -62,6 +62,7 @@ class SupervisorNode(Node):
         self._last_killed_state = None
         self._have_killed_state = False
         self._auto_initialize_thrusters_in_progress = False
+        self._auto_initialize_thrusters_request_pending = False
         self._auto_initialize_thrusters_start_stamp = None
         self._auto_initialize_thrusters_timer = None
 
@@ -226,7 +227,10 @@ class SupervisorNode(Node):
         return response
 
     def _start_auto_initialize_all_thrusters(self):
-        if self._auto_initialize_thrusters_in_progress:
+        if (
+            self._auto_initialize_thrusters_in_progress
+            or self._auto_initialize_thrusters_request_pending
+        ):
             return
 
         if not self.get_parameter("auto_initialize_thrusters_on_killed_recovery").value:
@@ -243,6 +247,8 @@ class SupervisorNode(Node):
             return
 
         if self._initialize_all_thrusters_client.service_is_ready():
+            self._auto_initialize_thrusters_in_progress = False
+            self._auto_initialize_thrusters_request_pending = True
             self.get_logger().info("Thruster auto-initialization request sent")
             future = self._initialize_all_thrusters_client.call_async(Trigger.Request())
             future.add_done_callback(self._on_initialize_all_thrusters_result)
@@ -257,17 +263,16 @@ class SupervisorNode(Node):
             self.get_logger().warning(status)
 
     def _on_initialize_all_thrusters_result(self, future):
+        self._auto_initialize_thrusters_request_pending = False
         try:
             response = future.result()
         except Exception as exc:  # noqa: BLE001
-            self._auto_initialize_thrusters_in_progress = False
             status = f"Thruster auto-initialization failed: {exc}"
             self._set_status(status)
             self.get_logger().warning(status)
             return
 
         if response.success:
-            self._auto_initialize_thrusters_in_progress = False
             status = "Thruster auto-initialization succeeded"
             if response.message:
                 status = f"{status}: {response.message}"
@@ -275,7 +280,6 @@ class SupervisorNode(Node):
             self.get_logger().info(status)
             return
 
-        self._auto_initialize_thrusters_in_progress = False
         status = "Thruster auto-initialization failed"
         if response.message:
             status = f"{status}: {response.message}"
