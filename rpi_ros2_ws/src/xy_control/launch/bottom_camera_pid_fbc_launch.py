@@ -18,9 +18,9 @@ def generate_launch_description():
             ('control/pid/output', 'control/pid/bottom_camera/x/force_world_N'),
         ],
         parameters=[{
-            'proportional_gain': 0.1,
+            'proportional_gain': 0.03,
             'integral_gain': 0.00001,
-            'derivative_gain': 0.05,
+            'derivative_gain': 0.001,
             'derivative_smoothing_factor': 0.2,
         }],
     )
@@ -36,9 +36,9 @@ def generate_launch_description():
             ('control/pid/output', 'control/pid/bottom_camera/y/force_world_N'),
         ],
         parameters=[{
-            'proportional_gain': 0.05,
+            'proportional_gain': 0.03,
             'integral_gain': 0.00001,
-            'derivative_gain': 0.01,
+            'derivative_gain': 0.001,
             'derivative_smoothing_factor': 0.2,
         }],
     )
@@ -54,9 +54,9 @@ def generate_launch_description():
             ('control/pid/output', 'control/pid/bottom_camera/yaw/torque_Nm'),
         ],
         parameters=[{
-            'proportional_gain': 2.0,
+            'proportional_gain': 0.5,
             'integral_gain': 0.0,
-            'derivative_gain': 0.1,
+            'derivative_gain': 0.02,
             'derivative_smoothing_factor': 0.2,
         }],
     )
