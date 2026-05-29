@@ -29,6 +29,7 @@ class OutputSinkForceToOutputWrenchNode(Node):
 
         self._orientation_quaternion = Quaternion(1, 0, 0, 0)
         self.declare_parameter('use_sink_force_direction', False)
+        self.declare_parameter('depth_force_bias_N', 5.0)
 
     def _orientation_subscription_callback(self, msg):
         self._orientation_quaternion = Quaternion(msg.w, msg.x, msg.y, msg.z)
@@ -39,7 +40,9 @@ class OutputSinkForceToOutputWrenchNode(Node):
         return vehicle_frame_sink_direction.vector_part
 
     def _output_sink_force_subscription_callback(self, msg):
-        output_sink_force_N = msg.data
+        pid_sink_force_N = msg.data
+        depth_force_bias_N = self.get_parameter('depth_force_bias_N').get_parameter_value().double_value
+        output_sink_force_N = pid_sink_force_N + depth_force_bias_N
 
         use_sink_force_direction = self.get_parameter('use_sink_force_direction').get_parameter_value().bool_value
 

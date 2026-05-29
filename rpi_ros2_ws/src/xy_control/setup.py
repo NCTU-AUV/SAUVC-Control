@@ -31,6 +31,7 @@ setup(
             'lk_total_transform_node = xy_control.lk_total_transform_node:main',
             'waypoint_target_publisher = xy_control.waypoint_target_publisher:main',
             'yaw_reference_unwrapper_node = xy_control.yaw_reference_unwrapper_node:main',
+            'dive_then_forward_mission_node = xy_control.dive_then_forward_mission_node:main',
         ],
     },
 )

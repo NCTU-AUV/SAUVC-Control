@@ -83,6 +83,9 @@ def generate_launch_description():
             'x_manipulated_topic': 'control/pid/bottom_camera/x/force_world_N',
             'y_manipulated_topic': 'control/pid/bottom_camera/y/force_world_N',
             'yaw_manipulated_topic': 'control/pid/bottom_camera/yaw/torque_Nm',
+            'max_force_x_N': 10.0,
+            'max_force_y_N': 10.0,
+            'max_yaw_torque_Nm': 5.0,
         }],
     )
 

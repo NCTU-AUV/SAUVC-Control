@@ -2,15 +2,20 @@ import json
 import os
 import signal
 import subprocess
+from collections import deque
 
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters
 from rcl_interfaces.srv import SetParameters
+from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from std_msgs.msg import Float32
 from std_msgs.msg import Float64
+from std_msgs.msg import Float64MultiArray
 from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 from geometry_msgs.msg import Wrench
@@ -21,19 +26,59 @@ from .backend import protocol
 from .backend.aiohttp_server import AIOHTTPServer
 
 
+class _TopicRateTracker:
+    """Track recent message intervals and estimate publish frequency."""
+
+    def __init__(self, window_size: int = 30):
+        self._intervals = deque(maxlen=window_size)
+        self._last_message_time_s = None
+
+    def tick(self, now_s: float):
+        if self._last_message_time_s is not None:
+            interval_s = now_s - self._last_message_time_s
+            if interval_s > 0.0:
+                self._intervals.append(interval_s)
+        self._last_message_time_s = now_s
+
+    def get_hz(self, now_s: float):
+        if not self._intervals:
+            return None
+
+        avg_interval_s = sum(self._intervals) / len(self._intervals)
+        if avg_interval_s <= 0.0:
+            return None
+
+        stale_timeout_s = max(1.0, avg_interval_s * 3.0)
+        if self._last_message_time_s is None:
+            return None
+        if now_s - self._last_message_time_s > stale_timeout_s:
+            return 0.0
+
+        return 1.0 / avg_interval_s
+
+
 class _AsyncParameterClient:
     """Minimal async parameter client for ROS 2 Humble."""
 
     def __init__(self, node: Node, node_name: str):
-        self._client = node.create_client(SetParameters, f"{node_name}/set_parameters")
+        self._set_client = node.create_client(SetParameters, f"{node_name}/set_parameters")
+        self._get_client = node.create_client(GetParameters, f"{node_name}/get_parameters")
 
     def service_is_ready(self) -> bool:
-        return self._client.service_is_ready()
+        return self._set_client.service_is_ready()
+
+    def get_service_is_ready(self) -> bool:
+        return self._get_client.service_is_ready()
 
     def set_parameters(self, params):
         request = SetParameters.Request()
         request.parameters = [p.to_parameter_msg() for p in params]
-        return self._client.call_async(request)
+        return self._set_client.call_async(request)
+
+    def get_parameters(self, names):
+        request = GetParameters.Request()
+        request.names = list(names)
+        return self._get_client.call_async(request)
 
 
 class GUINode(Node):
@@ -51,6 +96,43 @@ class GUINode(Node):
         self.aiohttp_server = AIOHTTPServer(self._msg_callback)
         self.aiohttp_server.start_threading()
         self._robot_namespace = self.get_namespace().strip('/')
+        self._bottom_camera_pose_rate_tracker = _TopicRateTracker()
+        self._bottom_camera_yaw_rate_tracker = _TopicRateTracker()
+        self._bottom_camera_image_rate_tracker = _TopicRateTracker()
+        self._bottom_camera_image_width = None
+        self._bottom_camera_image_height = None
+        self._pid_param_names = (
+            "proportional_gain",
+            "integral_gain",
+            "derivative_gain",
+            "derivative_smoothing_factor",
+        )
+        self._pid_param_groups = {
+            "depth": {
+                "topic": protocol.TOPIC_DEPTH_PID_PARAMS,
+                "nodes": {
+                    "depth": "depth_pid_controller_node",
+                },
+            },
+            "bottom_camera": {
+                "topic": protocol.TOPIC_BOTTOM_CAMERA_PID_PARAMS,
+                "nodes": {
+                    "x": "x_coordinate_pid_controller_node",
+                    "y": "y_coordinate_pid_controller_node",
+                    "yaw": "yaw_angle_pid_controller_node",
+                },
+            },
+        }
+        self._pid_param_state = {
+            group_key: {}
+            for group_key in self._pid_param_groups
+        }
+        self._pid_param_futures = {}
+        self._node_to_pid_param_entry = {
+            node_name: (group_key, axis_key)
+            for group_key, group_spec in self._pid_param_groups.items()
+            for axis_key, node_name in group_spec["nodes"].items()
+        }
 
         self._killed_subscription = self.create_subscription(
                 msg_type=Bool,
@@ -62,6 +144,12 @@ class GUINode(Node):
                 msg_type=Float32,
                 topic=protocol.TOPIC_DEPTH_M,
                 callback=self._pressure_sensor_depth_callback,
+                qos_profile=10
+            )
+        self._target_depth_subscriber = self.create_subscription(
+                msg_type=Float64,
+                topic=protocol.TOPIC_TARGET_DEPTH_M,
+                callback=self._target_depth_callback,
                 qos_profile=10
             )
         self._stm32_log_subscriber = self.create_subscription(
@@ -82,6 +170,18 @@ class GUINode(Node):
                 callback=self._supervisor_status_callback,
                 qos_profile=10
             )
+        self._bottom_camera_pose_subscriber = self.create_subscription(
+            msg_type=Float64MultiArray,
+            topic=protocol.TOPIC_BOTTOM_CAMERA_POSE_PX,
+            callback=self._bottom_camera_pose_callback,
+            qos_profile=10,
+        )
+        self._bottom_camera_image_subscriber = self.create_subscription(
+            msg_type=Image,
+            topic=protocol.TOPIC_BOTTOM_CAMERA_IMAGE_RAW,
+            callback=self._bottom_camera_image_callback,
+            qos_profile=10,
+        )
         self._bottom_camera_pid_topic_subscribers = [
             self.create_subscription(
                 msg_type=Float64,
@@ -108,6 +208,14 @@ class GUINode(Node):
             'thrusters/initialize_all',
         )
         self._flash_stm32_client = self.create_client(Trigger, '/flash_stm32')
+        self._bottom_camera_pose_reset_client = self.create_client(
+            Trigger,
+            "camera/bottom/reset_pose",
+        )
+        self._move_to_point_reset_client = self.create_client(
+            Trigger,
+            "control/targets/reset_move_to_point",
+        )
         self._supervisor_clients = {
             protocol.SUPERVISOR_SERVICE_SAFE_DISABLED: self.create_client(
                 Trigger,
@@ -202,15 +310,17 @@ class GUINode(Node):
         }
         self._processes = {}
 
+        self._controller_group_axes = {
+            protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC: dict(
+                self._pid_param_groups["bottom_camera"]["nodes"]
+            ),
+            protocol.CONTROLLER_GROUP_DEPTH_CONTROL: dict(
+                self._pid_param_groups["depth"]["nodes"]
+            ),
+        }
         self._controller_groups = {
-            protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC: [
-                "x_coordinate_pid_controller_node",
-                "y_coordinate_pid_controller_node",
-                "yaw_angle_pid_controller_node",
-            ],
-            protocol.CONTROLLER_GROUP_DEPTH_CONTROL: [
-                "depth_pid_controller_node",
-            ],
+            group_name: list(axis_nodes.values())
+            for group_name, axis_nodes in self._controller_group_axes.items()
         }
         self._param_clients = {}
         self._controller_supervisor_actions = {
@@ -239,12 +349,23 @@ class GUINode(Node):
                 protocol.CONTROLLER_ACTION_RESET,
             ): protocol.SUPERVISOR_SERVICE_RESET_CONTROLLERS,
         }
+        self._bottom_camera_topic_stats_timer = self.create_timer(
+            0.5,
+            self._publish_bottom_camera_topic_stats,
+        )
+        self._pid_params_timer = self.create_timer(
+            0.5,
+            self._request_pid_params,
+        )
 
     def _killed_callback(self, msg):
         self.aiohttp_server.send_topic(protocol.TOPIC_KILLED, msg.data)
 
     def _pressure_sensor_depth_callback(self, msg: Float32):
         self.aiohttp_server.send_topic(protocol.TOPIC_DEPTH_M, msg.data)
+
+    def _target_depth_callback(self, msg: Float64):
+        self.aiohttp_server.send_topic(protocol.TOPIC_TARGET_DEPTH_M, msg.data)
 
     def _stm32_log_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_STM32_LOG, msg.data)
@@ -255,8 +376,107 @@ class GUINode(Node):
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
 
+    def _bottom_camera_pose_callback(self, msg: Float64MultiArray):
+        del msg
+        self._bottom_camera_pose_rate_tracker.tick(self._now_seconds())
+
+    def _bottom_camera_image_callback(self, msg: Image):
+        self._bottom_camera_image_rate_tracker.tick(self._now_seconds())
+        self._bottom_camera_image_width = int(msg.width)
+        self._bottom_camera_image_height = int(msg.height)
+
     def _float64_topic_callback(self, topic_name: str, msg: Float64):
+        if topic_name == protocol.TOPIC_BOTTOM_CAMERA_PID_YAW_FEEDBACK_RAD:
+            self._bottom_camera_yaw_rate_tracker.tick(self._now_seconds())
         self.aiohttp_server.send_topic(topic_name, msg.data)
+
+    def _publish_bottom_camera_topic_stats(self):
+        now_s = self._now_seconds()
+        self.aiohttp_server.send_topic(
+            protocol.TOPIC_BOTTOM_CAMERA_TOPIC_STATS,
+            {
+                "lk_pose_hz": self._bottom_camera_pose_rate_tracker.get_hz(now_s),
+                "yaw_hz": self._bottom_camera_yaw_rate_tracker.get_hz(now_s),
+                "image_raw_hz": self._bottom_camera_image_rate_tracker.get_hz(now_s),
+                "image_width": self._bottom_camera_image_width,
+                "image_height": self._bottom_camera_image_height,
+            },
+        )
+
+    def _request_pid_params(self):
+        for group_key, group_spec in self._pid_param_groups.items():
+            for axis_key, node_name in group_spec["nodes"].items():
+                self._request_pid_params_for_node(group_key, axis_key, node_name)
+
+    def _request_pid_params_for_node(self, group_key: str, axis_key: str, node_name: str):
+        future = self._pid_param_futures.get(node_name)
+        if future is not None and not future.done():
+            return
+
+        client = self._get_param_client(node_name)
+        if not client.get_service_is_ready():
+            return
+
+        future = client.get_parameters(self._pid_param_names)
+        self._pid_param_futures[node_name] = future
+        future.add_done_callback(
+            lambda f, g=group_key, a=axis_key, n=node_name: self._on_pid_params_result(
+                g,
+                a,
+                n,
+                f,
+            )
+        )
+
+    def _on_pid_params_result(self, group_key: str, axis_key: str, node_name: str, future):
+        self._pid_param_futures.pop(node_name, None)
+
+        try:
+            response = future.result()
+        except Exception:
+            return
+
+        params = self._extract_pid_params(response.values)
+        if params is None:
+            return
+
+        self._pid_param_state[group_key][axis_key] = params
+        self._publish_pid_param_group(group_key)
+
+    def _extract_pid_params(self, values):
+        if len(values) != len(self._pid_param_names):
+            return None
+
+        params = {}
+        for name, value in zip(self._pid_param_names, values):
+            if value.type != ParameterType.PARAMETER_DOUBLE:
+                return None
+            params[name] = value.double_value
+        return params
+
+    def _publish_pid_param_group(self, group_key: str):
+        group_spec = self._pid_param_groups[group_key]
+        group_state = self._pid_param_state[group_key]
+
+        if len(group_spec["nodes"]) == 1:
+            axis_key = next(iter(group_spec["nodes"]))
+            params = group_state.get(axis_key)
+            if params is None:
+                return
+            payload = params
+        else:
+            payload = {
+                axis_key: group_state[axis_key]
+                for axis_key in group_spec["nodes"]
+                if axis_key in group_state
+            }
+            if not payload:
+                return
+
+        self.aiohttp_server.send_topic(group_spec["topic"], payload)
+
+    def _now_seconds(self) -> float:
+        return self.get_clock().now().nanoseconds / 1_000_000_000.0
 
     def _pwm_output_signal_value_subscription_callback(self, msg: Int32MultiArray):
         values = list(msg.data)
@@ -303,6 +523,8 @@ class GUINode(Node):
                 self._send_move_to_point_goal(msg_data)
             elif action_name == protocol.ACTION_CANCEL_MOVE_TO_POINT:
                 self._cancel_move_to_point_goal()
+            elif action_name == protocol.ACTION_RESET_BOTTOM_CAMERA_POSE:
+                self._reset_bottom_camera_pose()
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 
@@ -352,6 +574,10 @@ class GUINode(Node):
                     msg = Float64()
                     msg.data = target_depth
                     self._target_depth_publisher.publish(msg)
+                    self.aiohttp_server.send_topic(
+                        protocol.TOPIC_TARGET_DEPTH_M,
+                        target_depth,
+                    )
 
             if topic_name == protocol.TOPIC_BOTTOM_CAMERA_YAW_TARGET_RAD:
                 try:
@@ -488,6 +714,76 @@ class GUINode(Node):
         self.aiohttp_server.send_topic(
             protocol.TOPIC_FLASH_STM32_STATUS,
             {"success": response.success, "message": response.message},
+        )
+
+    def _reset_bottom_camera_pose(self):
+        if not self._bottom_camera_pose_reset_client.service_is_ready():
+            message = "Bottom-camera pose reset service is not ready."
+            self.get_logger().warning(message)
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+                {"success": False, "message": message},
+            )
+            return
+
+        future = self._bottom_camera_pose_reset_client.call_async(Trigger.Request())
+        future.add_done_callback(self._on_bottom_camera_pose_reset_result)
+
+    def _on_bottom_camera_pose_reset_result(self, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            message = f"Bottom-camera pose reset failed: {exc}"
+            self.get_logger().error(message)
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+                {"success": False, "message": message},
+            )
+            return
+
+        if not response.success:
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+                {"success": False, "message": response.message},
+            )
+            return
+
+        msg = Float64()
+        msg.data = 0.0
+        self._target_yaw_publisher.publish(msg)
+
+        if not self._move_to_point_reset_client.service_is_ready():
+            message = "MoveToPoint reset service is not ready."
+            self.get_logger().warning(message)
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+                {"success": False, "message": message},
+            )
+            return
+
+        reset_future = self._move_to_point_reset_client.call_async(Trigger.Request())
+        reset_future.add_done_callback(self._on_move_to_point_reset_result)
+
+    def _on_move_to_point_reset_result(self, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            message = f"MoveToPoint reset failed: {exc}"
+            self.get_logger().error(message)
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+                {"success": False, "message": message},
+            )
+            return
+
+        if response.success:
+            message = "PID feedback and references reset."
+        else:
+            message = response.message
+
+        self.aiohttp_server.send_topic(
+            protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
+            {"success": response.success, "message": message},
         )
 
     def _send_move_to_point_goal(self, data):
@@ -749,6 +1045,13 @@ class GUINode(Node):
         for res in response.results:
             if not res.successful:
                 self.get_logger().warning(f"Param set failed on {node_name}: {res.reason}")
+                return
+        pid_param_entry = self._node_to_pid_param_entry.get(node_name)
+        if pid_param_entry is None:
+            return
+
+        group_key, axis_key = pid_param_entry
+        self._request_pid_params_for_node(group_key, axis_key, node_name)
 
     def _set_group_pid_params(self, group: str, params):
         nodes = self._controller_groups.get(group, [])
@@ -756,18 +1059,20 @@ class GUINode(Node):
             self.get_logger().warning(f"No nodes configured for {group}")
             return
 
-        try:
-            p = float(params["proportional_gain"])
-            i = float(params["integral_gain"])
-            d = float(params["derivative_gain"])
-            smoothing = float(params["derivative_smoothing_factor"])
-        except (KeyError, TypeError, ValueError):
-            self.get_logger().warning(f"Invalid PID params: {params}")
+        axis = params.get("axis")
+        if axis is not None:
+            axis_node_map = self._controller_group_axes.get(group, {})
+            node_name = axis_node_map.get(axis)
+            if node_name is None:
+                self.get_logger().warning(f"Unknown PID axis for {group}: {axis}")
+                return
+            nodes = [node_name]
+
+        parsed_params = self._parse_pid_params(params)
+        if parsed_params is None:
             return
 
-        if not (0.0 <= smoothing <= 1.0):
-            self.get_logger().warning(f"derivative_smoothing_factor out of range: {smoothing}")
-            return
+        p, i, d, smoothing = parsed_params
 
         for node_name in nodes:
             client = self._get_param_client(node_name)
@@ -782,6 +1087,23 @@ class GUINode(Node):
             ]
             future = client.set_parameters(parameters)
             future.add_done_callback(lambda f, n=node_name: self._log_param_result(n, f))
+
+    def _parse_pid_params(self, params):
+        try:
+            p = float(params["proportional_gain"])
+            i = float(params["integral_gain"])
+            d = float(params["derivative_gain"])
+            smoothing = float(params["derivative_smoothing_factor"])
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warning(f"Invalid PID params: {params}")
+            return None
+
+        if not (0.0 <= smoothing <= 1.0):
+            self.get_logger().warning(f"derivative_smoothing_factor out of range: {smoothing}")
+            return None
+
+        return p, i, d, smoothing
+
 
 def main(args=None):
     rclpy.init(args=args)

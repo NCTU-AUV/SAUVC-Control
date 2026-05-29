@@ -133,6 +133,7 @@ class AIOHTTPServer:
         if self._thread:
             self._thread.join(timeout=join_timeout)
 
+
 if __name__ == "__main__":
     aiohttp_server = AIOHTTPServer(lambda msg: print(msg))
     aiohttp_server.start_threading()

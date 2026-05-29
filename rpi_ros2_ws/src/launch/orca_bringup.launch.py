@@ -92,7 +92,9 @@ def generate_launch_description():
         executable='lk_total_transform_node',
         namespace=namespace,
         name='lk_total_transform_node',
-        parameters=[{'publish_debug_image': publish_lk_debug_image}],
+        parameters=[{
+            'publish_debug_image': publish_lk_debug_image,
+        }],
     )
 
     depth_control_launch = IncludeLaunchDescription(
@@ -136,7 +138,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'publish_lk_debug_image',
             default_value='false',
-            description='Whether to publish LK keypoint overlay images',
+            description='Whether to publish tile-line debug overlay images',
         ),
         bottom_camera_driver_launch,
         bottom_camera_pid_fbc_launch,

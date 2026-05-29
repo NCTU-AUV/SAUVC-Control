@@ -7,6 +7,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, Float64MultiArray
+from std_srvs.srv import Trigger
 from xy_translation_control_interfaces.action import MoveToPoint
 
 
@@ -42,16 +43,22 @@ class WaypointTargetPublisher(Node):
         if self.publish_period <= 0.0:
             self.get_logger().warn("publish_period <= 0; using 0.1 s.")
             self.publish_period = 0.1
-        self._current_point = (
+        self._initial_point = (
             float(self.get_parameter("initial_x_px").value),
             float(self.get_parameter("initial_y_px").value),
         )
+        self._current_point = self._initial_point
         self.publish_initial_target = bool(self.get_parameter("publish_initial_target").value)
 
         self.pub_target = self.create_publisher(Float64MultiArray, self.target_topic, 10)
         self.pub_target_x = self.create_publisher(Float64, self.target_x_topic, 10)
         self.pub_target_y = self.create_publisher(Float64, self.target_y_topic, 10)
         self.pub_done = self.create_publisher(Bool, self.done_topic, 10)
+        self._reset_service = self.create_service(
+            Trigger,
+            "control/targets/reset_move_to_point",
+            self._on_reset,
+        )
 
         self._active_goal = None
         self._action_server = ActionServer(
@@ -104,6 +111,19 @@ class WaypointTargetPublisher(Node):
 
     def _cancel_callback(self, goal_handle):
         return CancelResponse.ACCEPT
+
+    def _on_reset(self, request, response):
+        if self._active_goal is not None and self._active_goal.is_active:
+            response.success = False
+            response.message = "Cannot reset while a MoveToPoint goal is active."
+            return response
+
+        self._current_point = self._initial_point
+        self._publish_target_point(*self._current_point, log=True)
+        self._publish_done(True)
+        response.success = True
+        response.message = "MoveToPoint setpoint reset."
+        return response
 
     def _execute_callback(self, goal_handle):
         self._active_goal = goal_handle
