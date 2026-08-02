@@ -9,7 +9,6 @@ class SafetyMonitor:
         self.thrusters_enabled = False
         self.have_thrusters_enabled = False
         self.last_depth_stamp = None
-        self.last_bottom_camera_stamp = None
 
     def update_killed(self, killed: bool):
         self.killed = killed
@@ -21,10 +20,6 @@ class SafetyMonitor:
 
     def update_depth(self):
         self.last_depth_stamp = self._node.get_clock().now()
-
-    def update_bottom_camera_pose(self, values):
-        if values and len(values) >= 2:
-            self.last_bottom_camera_stamp = self._node.get_clock().now()
 
     def safety_ready(self):
         if self._require_not_killed():
@@ -50,14 +45,6 @@ class SafetyMonitor:
             return False, "Depth sensor data has not been received"
         if self._age_s(self.last_depth_stamp) > timeout_s:
             return False, "Depth sensor data is stale"
-        return True, ""
-
-    def bottom_camera_ready(self):
-        timeout_s = float(self._node.get_parameter("bottom_camera_timeout_s").value)
-        if self.last_bottom_camera_stamp is None:
-            return False, "Bottom camera pose has not been received"
-        if self._age_s(self.last_bottom_camera_stamp) > timeout_s:
-            return False, "Bottom camera pose is stale"
         return True, ""
 
     def _require_not_killed(self):

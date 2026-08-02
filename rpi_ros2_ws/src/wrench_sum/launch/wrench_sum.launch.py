@@ -22,8 +22,8 @@ def generate_launch_description():
                 # 在這裡列出你所有需要整合的 topic
                 'input_topics': [
                     'control/wrench_sources/gui',
-                    'control/wrench_sources/bottom_camera',
                     'control/wrench_sources/depth',
+                    'control/wrench_sources/decision',
                 ],
                 'output_topic': 'control/wrench_command',
                 'publish_rate': 30.0,

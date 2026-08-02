@@ -44,9 +44,12 @@ function initializeCameraFeed() {
         return;
     }
 
-    const bottomCameraTopic = "/orca_auv/camera/bottom/image_raw";
+    // 影像來源。底部相機退場後，這裡預期接的是 Autonomy 堆疊的 RealSense。
+    // web_video_server 會自己去 graph 上找這個 topic，找不到就顯示不出來，
+    // 不影響其他控制功能。
+    const cameraTopic = window.ORCA_CAMERA_TOPIC || "/orca/color/image_raw";
     const streamUrl = "http://" + window.location.hostname + ":8080/stream?topic="
-        + bottomCameraTopic
+        + cameraTopic
         + "&type=ros_compressed";
     cameraFeedElement.src = streamUrl;
 }

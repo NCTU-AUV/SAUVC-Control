@@ -23,9 +23,6 @@ const GuiProtocol = Object.freeze({
         flashStm32: "flash_stm32",
         setSupervisorSimulationMode: "set_supervisor_simulation_mode",
         setSupervisorManualMode: "set_supervisor_manual_mode",
-        moveToPoint: "move_to_point",
-        cancelMoveToPoint: "cancel_move_to_point",
-        resetBottomCameraPose: "reset_bottom_camera_pose",
     }),
     processTargets: Object.freeze({}),
     processActions: Object.freeze({
@@ -34,7 +31,6 @@ const GuiProtocol = Object.freeze({
         kill: "kill",
     }),
     controllerGroups: Object.freeze({
-        bottomCameraPidFbc: "bottom_camera_pid_fbc",
         depthControl: "depth_control",
     }),
     controllerActions: Object.freeze({
@@ -49,17 +45,6 @@ const GuiProtocol = Object.freeze({
         stm32Log: "diagnostics/stm32/log",
         systemManagerMode: "system_manager/mode",
         systemManagerStatus: "system_manager/status",
-        bottomCameraPosePx: "camera/bottom/pose_px",
-        bottomCameraImageRaw: "camera/bottom/image_raw",
-        bottomCameraPidXReferencePx: "control/pid/bottom_camera/x/reference_px",
-        bottomCameraPidYReferencePx: "control/pid/bottom_camera/y/reference_px",
-        bottomCameraYawTargetRad: "control/targets/bottom_camera/yaw_rad",
-        bottomCameraPidYawReferenceRad: "control/pid/bottom_camera/yaw/reference_rad",
-        bottomCameraPidXFeedbackPx: "control/pid/bottom_camera/x/feedback_px",
-        bottomCameraPidYFeedbackPx: "control/pid/bottom_camera/y/feedback_px",
-        bottomCameraPidYawFeedbackRad: "state/bottom_camera/yaw_rad",
-        bottomCameraPidParams: "control/pid/bottom_camera/gui_params",
-        bottomCameraTopicStats: "camera/bottom/gui/topic_stats",
         thrustersPwmUs: "thrusters/pwm_us",
         thrustersEnabled: "thrusters/enabled",
         electromagnetEnabled: "actuators/electromagnet/enabled",
@@ -67,8 +52,6 @@ const GuiProtocol = Object.freeze({
         targetDepthM: "control/targets/depth_m",
         depthPidParams: "control/pid/depth/gui_params",
         flashStm32Status: "flash_stm32_status",
-        moveToPointStatus: "control/targets/move_to_point/gui_status",
-        bottomCameraPoseResetStatus: "camera/bottom/reset_pose/gui_status",
     }),
     makeWebsocketUrl(hostname) {
         return "ws://" + hostname + this.websocketPath;

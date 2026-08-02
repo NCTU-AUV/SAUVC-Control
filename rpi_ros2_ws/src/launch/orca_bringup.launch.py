@@ -8,7 +8,6 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
 def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
-    publish_lk_debug_image = LaunchConfiguration('publish_lk_debug_image')
 
     thruster_pkg_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
@@ -27,9 +26,10 @@ def generate_launch_description():
         namespace=namespace,
         name='wrench_sum_node',
         parameters=[{
+            # wrench 匯流排的來源清單。
+            # bottom_camera 已隨光流鏈移入 legacy，來源移除。
             'input_topics': [
                 'control/wrench_sources/gui',
-                'control/wrench_sources/bottom_camera',
                 'control/wrench_sources/depth',
                 'control/wrench_sources/decision',
             ],
@@ -37,12 +37,6 @@ def generate_launch_description():
             'publish_rate': 30.0,
             'source_timeout_s': 0.5,
         }]
-    )
-
-    mavros = Node(
-        package='mavros',
-        executable='mavros_node',
-        parameters=[{'fcu_url': 'serial:///dev/ttyACM0:2000000'}]
     )
 
     gui_node = Node(
@@ -59,42 +53,6 @@ def generate_launch_description():
         executable='supervisor_node',
         namespace=namespace,
         name='supervisor_node',
-    )
-
-    bottom_camera_pid_fbc_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('xy_control'),
-                'launch',
-                'bottom_camera_pid_fbc_launch.py'
-            ])
-        ),
-        launch_arguments={
-            'namespace': namespace,
-        }.items(),
-    )
-
-    bottom_camera_driver_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([
-                FindPackageShare('bottom_camera'),
-                'launch',
-                'bottom_camera.launch.py',
-            ])
-        ),
-        launch_arguments={
-            'namespace': namespace,
-        }.items(),
-    )
-
-    lk_total_transform_node = Node(
-        package='xy_control',
-        executable='lk_total_transform_node',
-        namespace=namespace,
-        name='lk_total_transform_node',
-        parameters=[{
-            'publish_debug_image': publish_lk_debug_image,
-        }],
     )
 
     depth_control_launch = IncludeLaunchDescription(
@@ -129,6 +87,21 @@ def generate_launch_description():
         name='stm32_flasher_node',
     )
 
+    record_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('orca_bringup'),
+                'launch',
+                'record.launch.py',
+            ])
+        ),
+        launch_arguments={
+            'namespace': namespace,
+            'record': LaunchConfiguration('record'),
+            'record_images': LaunchConfiguration('record_images'),
+        }.items(),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'namespace',
@@ -136,17 +109,19 @@ def generate_launch_description():
             description='Robot namespace',
         ),
         DeclareLaunchArgument(
-            'publish_lk_debug_image',
-            default_value='false',
-            description='Whether to publish tile-line debug overlay images',
+            'record',
+            default_value='true',
+            description='Whether to record a bag alongside the control stack',
         ),
-        bottom_camera_driver_launch,
-        bottom_camera_pid_fbc_launch,
-        lk_total_transform_node,
+        DeclareLaunchArgument(
+            'record_images',
+            default_value='false',
+            description='Whether to also record compressed image topics',
+        ),
+        record_launch,
         depth_control_launch,
         thruster_pkg_launch,
         wrench_sum_node,
-        # mavros,
         supervisor_node,
         gui_node,
         stm32_flasher_node,

@@ -3,7 +3,6 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 from std_msgs.msg import Float32
 from std_msgs.msg import Float64
-from std_msgs.msg import Float64MultiArray
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -22,7 +21,6 @@ class SupervisorNode(Node):
         self.declare_parameter("require_not_killed", True)
         self.declare_parameter("require_thrusters_enabled", True)
         self.declare_parameter("depth_sensor_timeout_s", 1.0)
-        self.declare_parameter("bottom_camera_timeout_s", 1.0)
         self.declare_parameter("auto_flash_stm32_on_startup", True)
         self.declare_parameter("stm32_flash_service", "/flash_stm32")
         self.declare_parameter("stm32_flash_service_timeout_s", 15.0)
@@ -30,11 +28,6 @@ class SupervisorNode(Node):
         self._controller_groups = {
             "depth_control": [
                 "depth_pid_controller_node",
-            ],
-            "bottom_camera_pid_fbc": [
-                "x_coordinate_pid_controller_node",
-                "y_coordinate_pid_controller_node",
-                "yaw_angle_pid_controller_node",
             ],
         }
         self._wrench_sum_group = "wrench_sum"
@@ -64,12 +57,6 @@ class SupervisorNode(Node):
         self.create_subscription(Bool, "thrusters/enabled", self._on_thrusters_enabled, 10)
         self.create_subscription(Float32, "sensors/depth_m", self._on_depth_float32, 10)
         self.create_subscription(Float64, "state/depth_m", self._on_depth_float64, 10)
-        self.create_subscription(
-            Float64MultiArray,
-            "camera/bottom/pose_px",
-            self._on_bottom_camera_pose,
-            10,
-        )
 
         self.create_service(
             Trigger,
@@ -82,16 +69,6 @@ class SupervisorNode(Node):
             Trigger,
             "system_manager/disable/depth_hold",
             self._disable_depth_hold,
-        )
-        self.create_service(
-            Trigger,
-            "system_manager/set_mode/bottom_camera_hold",
-            self._set_bottom_camera_hold,
-        )
-        self.create_service(
-            Trigger,
-            "system_manager/disable/bottom_camera_hold",
-            self._disable_bottom_camera_hold,
         )
         self.create_service(Trigger, "system_manager/reset_controllers", self._reset_controllers)
 
@@ -116,9 +93,6 @@ class SupervisorNode(Node):
 
     def _on_depth_float64(self, msg: Float64):
         self._safety.update_depth()
-
-    def _on_bottom_camera_pose(self, msg: Float64MultiArray):
-        self._safety.update_bottom_camera_pose(msg.data)
 
     def _set_safe_disabled(self, request, response):
         self._set_mode(ControlMode.SAFE_DISABLED, "Operator requested SAFE_DISABLED")
@@ -166,33 +140,6 @@ class SupervisorNode(Node):
         response.message = self._status
         return response
 
-    def _set_bottom_camera_hold(self, request, response):
-        ok, reason = self._safety_ready()
-        if ok:
-            ok, reason = self._bottom_camera_ready()
-        if not ok:
-            self._enter_fault(reason)
-            response.success = False
-            response.message = reason
-            return response
-
-        if "bottom_camera_pid_fbc" not in self._active_controller_groups:
-            self._reset_group("bottom_camera_pid_fbc")
-            self._enable_group("bottom_camera_pid_fbc")
-            self._active_controller_groups.add("bottom_camera_pid_fbc")
-        self._refresh_mode_from_active_groups()
-        response.success = True
-        response.message = self._status
-        return response
-
-    def _disable_bottom_camera_hold(self, request, response):
-        self._disable_group("bottom_camera_pid_fbc")
-        self._active_controller_groups.discard("bottom_camera_pid_fbc")
-        self._refresh_mode_from_active_groups()
-        response.success = True
-        response.message = self._status
-        return response
-
     def _reset_controllers(self, request, response):
         self._controllers.reset_all()
         response.success = True
@@ -224,20 +171,9 @@ class SupervisorNode(Node):
         self._deactivate_wrench_sum()
 
     def _refresh_mode_from_active_groups(self):
-        depth_active = "depth_control" in self._active_controller_groups
-        bottom_camera_active = "bottom_camera_pid_fbc" in self._active_controller_groups
-
-        if depth_active and bottom_camera_active:
-            self._mode = ControlMode.DEPTH_AND_BOTTOM_CAMERA_HOLD
-            self._status = "Depth hold and bottom camera hold active"
-            self._activate_wrench_sum()
-        elif depth_active:
+        if "depth_control" in self._active_controller_groups:
             self._mode = ControlMode.DEPTH_HOLD
             self._status = "Depth hold active"
-            self._activate_wrench_sum()
-        elif bottom_camera_active:
-            self._mode = ControlMode.BOTTOM_CAMERA_HOLD
-            self._status = "Bottom camera hold active"
             self._activate_wrench_sum()
         else:
             self._mode = ControlMode.SAFE_DISABLED
@@ -250,9 +186,6 @@ class SupervisorNode(Node):
     def _depth_ready(self):
         return self._safety.depth_ready()
 
-    def _bottom_camera_ready(self):
-        return self._safety.bottom_camera_ready()
-
     def _check_active_mode_safety(self):
         if not self._active_controller_groups:
             return
@@ -264,12 +197,6 @@ class SupervisorNode(Node):
 
         if "depth_control" in self._active_controller_groups:
             ok, reason = self._depth_ready()
-            if not ok:
-                self._enter_fault(reason)
-                return
-
-        if "bottom_camera_pid_fbc" in self._active_controller_groups:
-            ok, reason = self._bottom_camera_ready()
             if not ok:
                 self._enter_fault(reason)
 

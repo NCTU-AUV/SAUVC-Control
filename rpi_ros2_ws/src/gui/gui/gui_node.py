@@ -2,59 +2,23 @@ import json
 import os
 import signal
 import subprocess
-from collections import deque
 
 import rclpy
-from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
 from rcl_interfaces.srv import SetParameters
-from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from std_msgs.msg import Float32
 from std_msgs.msg import Float64
-from std_msgs.msg import Float64MultiArray
 from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 from geometry_msgs.msg import Wrench
 from std_srvs.srv import Trigger
-from xy_translation_control_interfaces.action import MoveToPoint
 
 from .backend import protocol
 from .backend.aiohttp_server import AIOHTTPServer
-
-
-class _TopicRateTracker:
-    """Track recent message intervals and estimate publish frequency."""
-
-    def __init__(self, window_size: int = 30):
-        self._intervals = deque(maxlen=window_size)
-        self._last_message_time_s = None
-
-    def tick(self, now_s: float):
-        if self._last_message_time_s is not None:
-            interval_s = now_s - self._last_message_time_s
-            if interval_s > 0.0:
-                self._intervals.append(interval_s)
-        self._last_message_time_s = now_s
-
-    def get_hz(self, now_s: float):
-        if not self._intervals:
-            return None
-
-        avg_interval_s = sum(self._intervals) / len(self._intervals)
-        if avg_interval_s <= 0.0:
-            return None
-
-        stale_timeout_s = max(1.0, avg_interval_s * 3.0)
-        if self._last_message_time_s is None:
-            return None
-        if now_s - self._last_message_time_s > stale_timeout_s:
-            return 0.0
-
-        return 1.0 / avg_interval_s
 
 
 class _AsyncParameterClient:
@@ -96,11 +60,6 @@ class GUINode(Node):
         self.aiohttp_server = AIOHTTPServer(self._msg_callback)
         self.aiohttp_server.start_threading()
         self._robot_namespace = self.get_namespace().strip('/')
-        self._bottom_camera_pose_rate_tracker = _TopicRateTracker()
-        self._bottom_camera_yaw_rate_tracker = _TopicRateTracker()
-        self._bottom_camera_image_rate_tracker = _TopicRateTracker()
-        self._bottom_camera_image_width = None
-        self._bottom_camera_image_height = None
         self._pid_param_names = (
             "proportional_gain",
             "integral_gain",
@@ -112,14 +71,6 @@ class GUINode(Node):
                 "topic": protocol.TOPIC_DEPTH_PID_PARAMS,
                 "nodes": {
                     "depth": "depth_pid_controller_node",
-                },
-            },
-            "bottom_camera": {
-                "topic": protocol.TOPIC_BOTTOM_CAMERA_PID_PARAMS,
-                "nodes": {
-                    "x": "x_coordinate_pid_controller_node",
-                    "y": "y_coordinate_pid_controller_node",
-                    "yaw": "yaw_angle_pid_controller_node",
                 },
             },
         }
@@ -170,52 +121,11 @@ class GUINode(Node):
                 callback=self._supervisor_status_callback,
                 qos_profile=10
             )
-        self._bottom_camera_pose_subscriber = self.create_subscription(
-            msg_type=Float64MultiArray,
-            topic=protocol.TOPIC_BOTTOM_CAMERA_POSE_PX,
-            callback=self._bottom_camera_pose_callback,
-            qos_profile=10,
-        )
-        self._bottom_camera_image_subscriber = self.create_subscription(
-            msg_type=Image,
-            topic=protocol.TOPIC_BOTTOM_CAMERA_IMAGE_RAW,
-            callback=self._bottom_camera_image_callback,
-            qos_profile=10,
-        )
-        self._bottom_camera_pid_topic_subscribers = [
-            self.create_subscription(
-                msg_type=Float64,
-                topic=topic,
-                callback=lambda msg, topic_name=topic: self._float64_topic_callback(
-                    topic_name,
-                    msg,
-                ),
-                qos_profile=10,
-            )
-            for topic in (
-                protocol.TOPIC_BOTTOM_CAMERA_PID_X_REFERENCE_PX,
-                protocol.TOPIC_BOTTOM_CAMERA_PID_Y_REFERENCE_PX,
-                protocol.TOPIC_BOTTOM_CAMERA_YAW_TARGET_RAD,
-                protocol.TOPIC_BOTTOM_CAMERA_PID_YAW_REFERENCE_RAD,
-                protocol.TOPIC_BOTTOM_CAMERA_PID_X_FEEDBACK_PX,
-                protocol.TOPIC_BOTTOM_CAMERA_PID_Y_FEEDBACK_PX,
-                protocol.TOPIC_BOTTOM_CAMERA_PID_YAW_FEEDBACK_RAD,
-            )
-        ]
-
         self._initialize_all_thrusters_client = self.create_client(
             Trigger,
             'thrusters/initialize_all',
         )
         self._flash_stm32_client = self.create_client(Trigger, '/flash_stm32')
-        self._bottom_camera_pose_reset_client = self.create_client(
-            Trigger,
-            "camera/bottom/reset_pose",
-        )
-        self._move_to_point_reset_client = self.create_client(
-            Trigger,
-            "control/targets/reset_move_to_point",
-        )
         self._supervisor_clients = {
             protocol.SUPERVISOR_SERVICE_SAFE_DISABLED: self.create_client(
                 Trigger,
@@ -229,10 +139,6 @@ class GUINode(Node):
                 Trigger,
                 "system_manager/set_mode/depth_hold",
             ),
-            protocol.SUPERVISOR_SERVICE_BOTTOM_CAMERA_HOLD: self.create_client(
-                Trigger,
-                "system_manager/set_mode/bottom_camera_hold",
-            ),
             protocol.SUPERVISOR_SERVICE_RESET_CONTROLLERS: self.create_client(
                 Trigger,
                 "system_manager/reset_controllers",
@@ -240,10 +146,6 @@ class GUINode(Node):
             protocol.SUPERVISOR_SERVICE_DISABLE_DEPTH_HOLD: self.create_client(
                 Trigger,
                 "system_manager/disable/depth_hold",
-            ),
-            protocol.SUPERVISOR_SERVICE_DISABLE_BOTTOM_CAMERA_HOLD: self.create_client(
-                Trigger,
-                "system_manager/disable/bottom_camera_hold",
             ),
         }
 
@@ -287,22 +189,7 @@ class GUINode(Node):
             protocol.TOPIC_TARGET_DEPTH_M,
             10,
         )
-        self._target_yaw_publisher = self.create_publisher(
-            Float64,
-            protocol.TOPIC_BOTTOM_CAMERA_YAW_TARGET_RAD,
-            10,
-        )
-        self._move_to_point_action_client = ActionClient(
-            self,
-            MoveToPoint,
-            protocol.MOVE_TO_POINT_ACTION_NAME,
-        )
-        self._move_to_point_goal_handle = None
         self._process_commands = {
-            protocol.PROCESS_BOTTOM_CAMERA_PID_FBC_LAUNCH: [
-                "ros2", "launch", "xy_control", "bottom_camera_pid_fbc_launch.py",
-                f"namespace:={self._robot_namespace}",
-            ],
             protocol.PROCESS_DEPTH_CONTROL_LAUNCH: [
                 "ros2", "launch", "depth_control", "depth_control_launch.py",
                 f"namespace:={self._robot_namespace}",
@@ -311,9 +198,6 @@ class GUINode(Node):
         self._processes = {}
 
         self._controller_group_axes = {
-            protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC: dict(
-                self._pid_param_groups["bottom_camera"]["nodes"]
-            ),
             protocol.CONTROLLER_GROUP_DEPTH_CONTROL: dict(
                 self._pid_param_groups["depth"]["nodes"]
             ),
@@ -324,18 +208,6 @@ class GUINode(Node):
         }
         self._param_clients = {}
         self._controller_supervisor_actions = {
-            (
-                protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC,
-                protocol.CONTROLLER_ACTION_ENABLE,
-            ): protocol.SUPERVISOR_SERVICE_BOTTOM_CAMERA_HOLD,
-            (
-                protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC,
-                protocol.CONTROLLER_ACTION_DISABLE,
-            ): protocol.SUPERVISOR_SERVICE_DISABLE_BOTTOM_CAMERA_HOLD,
-            (
-                protocol.CONTROLLER_GROUP_BOTTOM_CAMERA_PID_FBC,
-                protocol.CONTROLLER_ACTION_RESET,
-            ): protocol.SUPERVISOR_SERVICE_RESET_CONTROLLERS,
             (
                 protocol.CONTROLLER_GROUP_DEPTH_CONTROL,
                 protocol.CONTROLLER_ACTION_ENABLE,
@@ -349,10 +221,6 @@ class GUINode(Node):
                 protocol.CONTROLLER_ACTION_RESET,
             ): protocol.SUPERVISOR_SERVICE_RESET_CONTROLLERS,
         }
-        self._bottom_camera_topic_stats_timer = self.create_timer(
-            0.5,
-            self._publish_bottom_camera_topic_stats,
-        )
         self._pid_params_timer = self.create_timer(
             0.5,
             self._request_pid_params,
@@ -375,33 +243,6 @@ class GUINode(Node):
 
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
-
-    def _bottom_camera_pose_callback(self, msg: Float64MultiArray):
-        del msg
-        self._bottom_camera_pose_rate_tracker.tick(self._now_seconds())
-
-    def _bottom_camera_image_callback(self, msg: Image):
-        self._bottom_camera_image_rate_tracker.tick(self._now_seconds())
-        self._bottom_camera_image_width = int(msg.width)
-        self._bottom_camera_image_height = int(msg.height)
-
-    def _float64_topic_callback(self, topic_name: str, msg: Float64):
-        if topic_name == protocol.TOPIC_BOTTOM_CAMERA_PID_YAW_FEEDBACK_RAD:
-            self._bottom_camera_yaw_rate_tracker.tick(self._now_seconds())
-        self.aiohttp_server.send_topic(topic_name, msg.data)
-
-    def _publish_bottom_camera_topic_stats(self):
-        now_s = self._now_seconds()
-        self.aiohttp_server.send_topic(
-            protocol.TOPIC_BOTTOM_CAMERA_TOPIC_STATS,
-            {
-                "lk_pose_hz": self._bottom_camera_pose_rate_tracker.get_hz(now_s),
-                "yaw_hz": self._bottom_camera_yaw_rate_tracker.get_hz(now_s),
-                "image_raw_hz": self._bottom_camera_image_rate_tracker.get_hz(now_s),
-                "image_width": self._bottom_camera_image_width,
-                "image_height": self._bottom_camera_image_height,
-            },
-        )
 
     def _request_pid_params(self):
         for group_key, group_spec in self._pid_param_groups.items():
@@ -475,9 +316,6 @@ class GUINode(Node):
 
         self.aiohttp_server.send_topic(group_spec["topic"], payload)
 
-    def _now_seconds(self) -> float:
-        return self.get_clock().now().nanoseconds / 1_000_000_000.0
-
     def _pwm_output_signal_value_subscription_callback(self, msg: Int32MultiArray):
         values = list(msg.data)
         if len(values) < self._thruster_count:
@@ -519,12 +357,6 @@ class GUINode(Node):
                     self._call_supervisor(protocol.SUPERVISOR_SERVICE_MANUAL)
                 else:
                     self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
-            elif action_name == protocol.ACTION_MOVE_TO_POINT:
-                self._send_move_to_point_goal(msg_data)
-            elif action_name == protocol.ACTION_CANCEL_MOVE_TO_POINT:
-                self._cancel_move_to_point_goal()
-            elif action_name == protocol.ACTION_RESET_BOTTOM_CAMERA_POSE:
-                self._reset_bottom_camera_pose()
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 
@@ -578,16 +410,6 @@ class GUINode(Node):
                         protocol.TOPIC_TARGET_DEPTH_M,
                         target_depth,
                     )
-
-            if topic_name == protocol.TOPIC_BOTTOM_CAMERA_YAW_TARGET_RAD:
-                try:
-                    target_yaw = float(msg_data[protocol.FIELD_MSG]["data"])
-                except (KeyError, TypeError, ValueError):
-                    self.get_logger().warning(f"Invalid target yaw message: {msg_json_object}")
-                else:
-                    msg = Float64()
-                    msg.data = target_yaw
-                    self._target_yaw_publisher.publish(msg)
 
             if topic_name == protocol.TOPIC_ELECTROMAGNET_ENABLED:
                 try:
@@ -714,215 +536,6 @@ class GUINode(Node):
         self.aiohttp_server.send_topic(
             protocol.TOPIC_FLASH_STM32_STATUS,
             {"success": response.success, "message": response.message},
-        )
-
-    def _reset_bottom_camera_pose(self):
-        if not self._bottom_camera_pose_reset_client.service_is_ready():
-            message = "Bottom-camera pose reset service is not ready."
-            self.get_logger().warning(message)
-            self.aiohttp_server.send_topic(
-                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-                {"success": False, "message": message},
-            )
-            return
-
-        future = self._bottom_camera_pose_reset_client.call_async(Trigger.Request())
-        future.add_done_callback(self._on_bottom_camera_pose_reset_result)
-
-    def _on_bottom_camera_pose_reset_result(self, future):
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001
-            message = f"Bottom-camera pose reset failed: {exc}"
-            self.get_logger().error(message)
-            self.aiohttp_server.send_topic(
-                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-                {"success": False, "message": message},
-            )
-            return
-
-        if not response.success:
-            self.aiohttp_server.send_topic(
-                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-                {"success": False, "message": response.message},
-            )
-            return
-
-        msg = Float64()
-        msg.data = 0.0
-        self._target_yaw_publisher.publish(msg)
-
-        if not self._move_to_point_reset_client.service_is_ready():
-            message = "MoveToPoint reset service is not ready."
-            self.get_logger().warning(message)
-            self.aiohttp_server.send_topic(
-                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-                {"success": False, "message": message},
-            )
-            return
-
-        reset_future = self._move_to_point_reset_client.call_async(Trigger.Request())
-        reset_future.add_done_callback(self._on_move_to_point_reset_result)
-
-    def _on_move_to_point_reset_result(self, future):
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001
-            message = f"MoveToPoint reset failed: {exc}"
-            self.get_logger().error(message)
-            self.aiohttp_server.send_topic(
-                protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-                {"success": False, "message": message},
-            )
-            return
-
-        if response.success:
-            message = "PID feedback and references reset."
-        else:
-            message = response.message
-
-        self.aiohttp_server.send_topic(
-            protocol.TOPIC_BOTTOM_CAMERA_POSE_RESET_STATUS,
-            {"success": response.success, "message": message},
-        )
-
-    def _send_move_to_point_goal(self, data):
-        if (
-            self._move_to_point_goal_handle is not None
-            and self._move_to_point_goal_handle.accepted
-        ):
-            self._send_move_to_point_status(
-                "rejected",
-                "A move-to-point goal is already active.",
-            )
-            return
-
-        try:
-            x_px = float(data["x_px"])
-            y_px = float(data["y_px"])
-            speed_px_s = float(data["speed_px_s"])
-        except (KeyError, TypeError, ValueError):
-            self._send_move_to_point_status(
-                "rejected",
-                "Invalid move-to-point goal.",
-            )
-            return
-
-        if not self._move_to_point_action_client.server_is_ready():
-            self._send_move_to_point_status(
-                "rejected",
-                "Move-to-point action server is not ready.",
-            )
-            return
-
-        goal_msg = MoveToPoint.Goal()
-        goal_msg.x_px = x_px
-        goal_msg.y_px = y_px
-        goal_msg.speed_px_s = speed_px_s
-
-        self._send_move_to_point_status(
-            "sending",
-            f"Sending target ({x_px:.3f}, {y_px:.3f}) at {speed_px_s:.3f} px/s.",
-            x_px=x_px,
-            y_px=y_px,
-            speed_px_s=speed_px_s,
-        )
-
-        future = self._move_to_point_action_client.send_goal_async(
-            goal_msg,
-            feedback_callback=self._on_move_to_point_feedback,
-        )
-        future.add_done_callback(self._on_move_to_point_goal_response)
-
-    def _cancel_move_to_point_goal(self):
-        if self._move_to_point_goal_handle is None:
-            self._send_move_to_point_status("idle", "No active move-to-point goal.")
-            return
-
-        future = self._move_to_point_goal_handle.cancel_goal_async()
-        future.add_done_callback(self._on_move_to_point_cancel_response)
-        self._send_move_to_point_status("canceling", "Canceling move-to-point goal.")
-
-    def _on_move_to_point_goal_response(self, future):
-        try:
-            goal_handle = future.result()
-        except Exception as exc:  # noqa: BLE001
-            self._move_to_point_goal_handle = None
-            self._send_move_to_point_status(
-                "failed",
-                f"Move-to-point send failed: {exc}",
-            )
-            return
-
-        if not goal_handle.accepted:
-            self._move_to_point_goal_handle = None
-            self._send_move_to_point_status(
-                "rejected",
-                "Move-to-point goal rejected.",
-            )
-            return
-
-        self._move_to_point_goal_handle = goal_handle
-        self._send_move_to_point_status("active", "Move-to-point goal accepted.")
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_move_to_point_result)
-
-    def _on_move_to_point_feedback(self, feedback_msg):
-        feedback = feedback_msg.feedback
-        self._send_move_to_point_status(
-            "active",
-            "Move-to-point goal running.",
-            target_x_px=feedback.target_x_px,
-            target_y_px=feedback.target_y_px,
-            progress=feedback.progress,
-            remaining_distance_px=feedback.remaining_distance_px,
-        )
-
-    def _on_move_to_point_result(self, future):
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001
-            self._move_to_point_goal_handle = None
-            self._send_move_to_point_status(
-                "failed",
-                f"Move-to-point result failed: {exc}",
-            )
-            return
-
-        result = response.result
-        self._move_to_point_goal_handle = None
-        status = "succeeded" if result.success else "failed"
-        self._send_move_to_point_status(status, result.message)
-
-    def _on_move_to_point_cancel_response(self, future):
-        try:
-            response = future.result()
-        except Exception as exc:  # noqa: BLE001
-            self._send_move_to_point_status(
-                "failed",
-                f"Move-to-point cancel failed: {exc}",
-            )
-            return
-
-        if response.goals_canceling:
-            self._send_move_to_point_status(
-                "canceling",
-                "Move-to-point cancel accepted.",
-            )
-        else:
-            self._send_move_to_point_status(
-                "failed",
-                "Move-to-point cancel rejected.",
-            )
-
-    def _send_move_to_point_status(self, state: str, message: str, **extra):
-        self.aiohttp_server.send_topic(
-            protocol.TOPIC_MOVE_TO_POINT_STATUS,
-            {
-                "state": state,
-                "message": message,
-                **extra,
-            },
         )
 
     def _call_supervisor(self, service_key: str):
