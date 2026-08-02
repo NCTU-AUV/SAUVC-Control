@@ -1,0 +1,84 @@
+# =============================================================================
+# Bag 錄製設定
+# =============================================================================
+# 被 orca_bringup/launch/record.launch.py 讀取。改這裡不用重新 colcon build
+# （package 以 symlink-install 安裝 config 目錄），但要重新 launch 才生效。
+# -----------------------------------------------------------------------------
+
+storage:
+  # mcap 而非預設的 sqlite3。AUV 靠 kill switch 直接斷電，sqlite3 遇硬斷電
+  # 容易整包損毀；mcap 對檔案截斷友善，最壞只損失最後一段。
+  storage_id: mcap
+
+  # 分段長度（秒）。配合上面的理由：斷電時只有當前這一段有風險。
+  max_bag_duration_s: 120
+
+  # 啟動前檢查目標磁碟剩餘空間，低於此值就不錄並印警告，而不是把系統碟寫滿。
+  min_free_space_gb: 5.0
+
+# -----------------------------------------------------------------------------
+# 預設錄製的 topic（相對於載具 namespace，launch 時會自動加上前綴）
+#
+# 挑選原則：足以離線重建整條控制鏈路的因果關係 ——
+# 感測輸入 → 目標 → PID 輸出 → wrench 匯流排 → 分配 → 推進器指令，
+# 外加系統模式，才能回答「當時為什麼推進器出這個力」。
+# -----------------------------------------------------------------------------
+topics:
+  # --- 感測輸入（STM32 / 模擬） ---
+  - sensors/depth_m
+  - sensors/imu
+  - sensors/killed
+
+  # --- 轉換後的狀態 ---
+  - state/depth_m
+  - state/orientation
+
+  # --- 控制目標 ---
+  - control/targets/depth_m
+
+  # --- Wrench 匯流排：每個來源都要，才能事後拆解合力的組成 ---
+  - control/wrench_sources/gui
+  - control/wrench_sources/depth
+  - control/wrench_sources/decision
+  - control/wrench_sources/bottom_camera
+  - control/wrench_command
+
+  # --- PID 中間量 ---
+  - control/pid/depth/sink_force_N
+
+  # --- 致動 ---
+  - thrusters/thruster_0/force_N
+  - thrusters/thruster_1/force_N
+  - thrusters/thruster_2/force_N
+  - thrusters/thruster_3/force_N
+  - thrusters/thruster_4/force_N
+  - thrusters/thruster_5/force_N
+  - thrusters/thruster_6/force_N
+  - thrusters/thruster_7/force_N
+  - thrusters/pwm_us
+  - thrusters/enabled
+  - thrusters/set_enabled
+  - thrusters/initializing
+
+  # --- 系統狀態 ---
+  - system_manager/mode
+  - system_manager/status
+
+# -----------------------------------------------------------------------------
+# 絕對路徑的 topic（不加 namespace 前綴）。
+# 決策層跑在另一個 container 且用自己的 global namespace。
+# -----------------------------------------------------------------------------
+absolute_topics:
+  - /rosout
+  - /orca/decision/status
+  - /orca/decision/camera_mode
+
+# -----------------------------------------------------------------------------
+# 影像 topic：預設不錄。
+#
+# 原始影像會吃爆儲存並拖垮 I/O，在 Orin NX 上同時要跟 TensorRT 推論搶頻寬。
+# 需要時用 `record_images:=true` 開啟，且只錄 compressed。
+# -----------------------------------------------------------------------------
+image_topics:
+  - camera/bottom/image_raw/compressed
+  - color/image_raw/compressed

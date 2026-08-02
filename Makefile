@@ -1,8 +1,18 @@
+# -----------------------------------------------------------------------------
+# 環境設定的唯一來源是 .env（docker compose 也讀同一份）。
+# 這裡 include 進來是為了讓 `docker compose exec` 出來的 shell 拿到同樣的值。
+# 不要在本檔案裡另外寫死 ROS_DOMAIN_ID / RMW_IMPLEMENTATION 等值。
+# -----------------------------------------------------------------------------
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 # Define variables
-IMAGE_NAME := orca-auv-rpi-ros2-image
-CONTAINER_NAME := orca-auv-rpi-ros2-container
+IMAGE_NAME ?= orca-auv-rpi-ros2-image
+CONTAINER_NAME ?= orca-auv-rpi-ros2-container
 WORKSPACE := rpi_ros2_ws
-IMAGE_OWNER_NAME := dianyueguo
+IMAGE_OWNER_NAME ?= dianyueguo
 PWD := $(shell pwd)
 # Prefer Docker Compose v2 (docker compose) but fall back to v1 (docker-compose); allow override via env/CLI
 COMPOSE ?= $(shell \
@@ -34,31 +44,35 @@ XAUTH_FLAGS := $(if $(and $(XAUTH_FILE),$(wildcard $(XAUTH_FILE))),-v $(XAUTH_FI
 ROS_DOMAIN_ID ?= 0
 ROS_LOCALHOST_ONLY ?= 0
 RMW_IMPLEMENTATION ?= rmw_fastrtps_cpp
-ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST_ONLY) RMW_IMPLEMENTATION=$(RMW_IMPLEMENTATION)
+# 見 .env 的說明：這是正確性設定，不是效能調校。
+FASTDDS_BUILTIN_TRANSPORTS ?= UDPv4
+ORCA_NAMESPACE ?= orca_auv
+ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST_ONLY) RMW_IMPLEMENTATION=$(RMW_IMPLEMENTATION) FASTDDS_BUILTIN_TRANSPORTS=$(FASTDDS_BUILTIN_TRANSPORTS)
 BRINGUP_LOG ?= /tmp/orca_bringup.log
-MISSION_NAMESPACE ?= /orca_auv
-MISSION_LOG ?= /tmp/dive_then_forward_mission.log
-MISSION_ARGS ?=
+SNAPSHOT_DIR ?= snapshots
 
-.PHONY: all debug compose_up compose_start compose_down compose_build compose_shell init launch launch_debug launch_detached launch_logs mission_dive_detached mission_dive_status mission_dive_logs mission_dive_stop compose_init compose_launch compose_launch_detached compose_clean clean update_image
+# -----------------------------------------------------------------------------
+# 停掉整個堆疊。
+#
+# 用單一 pattern `rpi_ros2_ws/install` 涵蓋所有節點，而不是逐一列出節點名 ——
+# 舊版那份 17 行的 pkill 清單每次新增／改名節點都會漏掉，漏掉的節點會變成
+# 孤兒程序繼續跑，下次啟動就變成同時有兩套 supervisor 在互相覆蓋狀態
+# （實測症狀：set_mode 回 success，但 system_manager/mode 一直廣播 SAFE_DISABLED）。
+#
+# `[r]` 括號技巧是必要的：pkill -f 會匹配整條命令列，而執行這段的
+# `bash -lc '...'` 自己的命令列就含有這個 pattern，不繞開的話會先殺掉自己。
+# -----------------------------------------------------------------------------
+STOP_STACK := \
+	pkill -INT -f '[r]os2 launch' || true; \
+	sleep 2; \
+	pkill -9 -f '[r]pi_ros2_ws/install' || true; \
+	pkill -9 -f '[w]eb_video_server' || true; \
+	pkill -9 -f '[m]icro_ros_agent' || true; \
+	sleep 1
+
+.PHONY: all compose_up compose_start compose_down compose_build compose_shell init launch launch_detached launch_logs compose_init compose_launch compose_launch_detached compose_clean clean update_image
 
 all: init launch
-
-debug: init
-	@echo "Starting tile-line debug viewer..."
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		sleep 5; \
-		export XDG_RUNTIME_DIR=/tmp/runtime-root; \
-		mkdir -p \$$XDG_RUNTIME_DIR; \
-		chmod 700 \$$XDG_RUNTIME_DIR; \
-		export LIBGL_ALWAYS_SOFTWARE=1; \
-		export QT_X11_NO_MITSHM=1; \
-		exec rqt_image_view /orca_auv/camera/bottom/debug/tile_lines"
-	@echo "Starting hardware launch with tile-line debug image publishing enabled..."
-	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		ros2 launch src/launch/orca_bringup.launch.py publish_lk_debug_image:=true"
 
 update_image:
 	docker buildx build --pull --platform=linux/arm64,linux/amd64 -t $(IMAGE_OWNER_NAME)/$(IMAGE_NAME):latest . --push
@@ -107,11 +121,6 @@ launch: compose_up
 		source install/setup.bash && \
 		ros2 launch src/launch/orca_bringup.launch.py"
 
-launch_debug: compose_up
-	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		ros2 launch src/launch/orca_bringup.launch.py publish_lk_debug_image:=true"
-
 launch_detached: compose_up
 	@echo "Launching ROS stack in detached mode"
 	HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T -d orca /bin/bash -lc "\
@@ -126,45 +135,6 @@ launch_detached: compose_up
 launch_logs: compose_start
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
 		tail -n 200 -f $(BRINGUP_LOG)"
-
-mission_dive_detached: compose_start
-	@echo "Starting dive-then-forward mission in detached mode"
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
-		pkill -f '[d]ive_then_forward_mission_node' || true"
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T -d orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		rm -f $(MISSION_LOG); \
-		echo \"Starting dive_then_forward_mission_node at \$$(date -Is)\" > $(MISSION_LOG); \
-		exec ros2 run xy_control dive_then_forward_mission_node \
-			--ros-args \
-			-r __ns:=$(MISSION_NAMESPACE) \
-			$(MISSION_ARGS) \
-			>> $(MISSION_LOG) 2>&1"
-	@echo "Mission process requested. Follow logs with: make mission_dive_logs"
-
-mission_dive_status: compose_start
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		echo '--- Mission process ---'; \
-		ps -eo pid,ppid,tty,stat,cmd | grep -E '[d]ive_then_forward_mission_node' || true; \
-		echo ''; \
-		echo '--- Mission node ---'; \
-		ros2 node list 2>/dev/null | grep -E '^$(MISSION_NAMESPACE)/dive_then_forward_mission_node$$' || true; \
-		echo ''; \
-		echo '--- Supervisor ---'; \
-		timeout 3s ros2 topic echo --once $(MISSION_NAMESPACE)/system_manager/mode std_msgs/msg/String || true; \
-		timeout 3s ros2 topic echo --once $(MISSION_NAMESPACE)/system_manager/status std_msgs/msg/String || true"
-
-mission_dive_logs: compose_start
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
-		tail -n 200 -f $(MISSION_LOG)"
-
-mission_dive_stop: compose_start
-	@echo "Stopping dive-then-forward mission and requesting SAFE_DISABLED"
-	-@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		pkill -f '[d]ive_then_forward_mission_node' || true; \
-		timeout 5s ros2 service call $(MISSION_NAMESPACE)/system_manager/set_mode/safe_disabled std_srvs/srv/Trigger '{}' || true"
 
 compose_init: init
 
@@ -186,7 +156,6 @@ clean: compose_clean
 # --------------------------------------------------------------------
 # These targets are for controlling SAUVC-Simulation from SAUVC-RPI.
 # They intentionally DO NOT start hardware-only nodes:
-# - bottom_camera_node
 # - stm32_flasher_node
 # - micro_ros_agent
 # - thruster PWM conversion node
@@ -202,8 +171,7 @@ clean: compose_clean
 .PHONY: \
 	sim_launch sim_launch_detached sim_stop sim_status sim_check sim_logs \
 	sim_gui_detached sim_wrench_sum_detached sim_activate_wrench_sum \
-	sim_set_manual sim_thruster_allocator_detached sim_lk_detached \
-	sim_rqt_lk sim_rqt_tile_lines
+	sim_set_manual sim_thruster_allocator_detached
 
 ROS_SETUP := cd $(WORKSPACE) && \
 	source /opt/ros/humble/setup.bash && \
@@ -217,41 +185,18 @@ sim_launch: sim_launch_detached sim_status
 	@echo "Simulation control stack started."
 	@echo "Open GUI at: http://localhost/controller"
 	@echo "Or from another device: http://<HOST_IP>/controller"
-	@echo ""
-	@echo "To view tile-line tracking:"
-	@echo "  make sim_rqt_tile_lines"
 
 sim_launch_detached: compose_up
 	@echo "Stopping old SAUVC-RPI simulation-control nodes..."
 	-@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
-		pkill -f '[s]imulation_control.launch.py' || true; \
-		pkill -f '[b]ottom_camera_pid_fbc_launch.py' || true; \
-		pkill -f '[d]epth_control_launch.py' || true; \
-		pkill -f '[w]rench_sum.launch.py' || true; \
-		pkill -f '[g]ui_node' || true; \
-		pkill -f '[s]upervisor_node' || true; \
-		pkill -f '[w]rench_sum_node' || true; \
-		pkill -f '[w]rench_to_individual_thrusters_output_forces_node' || true; \
-		pkill -f '[l]k_total_transform_node' || true; \
-		pkill -f '[g]eneric_pid_controller_node' || true; \
-		pkill -f '[b]ottom_camera_pid_bridge_node' || true; \
-		pkill -f '[w]aypoint_target_publisher' || true; \
-		pkill -f '[y]aw_reference_unwrapper_node' || true; \
-		pkill -f '[o]utput_sink_force_to_output_wrench_node' || true; \
-		pkill -f '[f]loat32_to_float64_converter_node' || true; \
-		pkill -f '[i]mu_to_orientation_node' || true; \
-		pkill -f '[b]ottom_camera_node' || true; \
-		pkill -f '[o]rca_bringup.launch.py' || true; \
-		pkill -f '[w]eb_video_server' || true; \
+		$(STOP_STACK); \
 		source /opt/ros/humble/setup.bash; \
-		ros2 daemon stop || true; \
-		sleep 1"
+		ros2 daemon stop || true"
 	@echo "Starting simulation launch: GUI, tile-line tracking, supervisor, controllers, wrench sum, thruster force allocator..."
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		exec ros2 launch src/launch/simulation_control.launch.py \
-			namespace:=orca_auv \
-			publish_lk_debug_image:=true \
+			namespace:=$(ORCA_NAMESPACE) \
 			> /tmp/sauvc_rpi_sim_control.log 2>&1"
 	@echo "Waiting for lifecycle services..."
 	@sleep 4
@@ -284,41 +229,31 @@ sim_activate_wrench_sum:
 		fi; \
 		timeout 10s ros2 lifecycle get /orca_auv/wrench_sum_node || true"
 
-sim_stop:
-	@echo "Stopping SAUVC-RPI simulation-control nodes..."
+sim_stop: stop
+
+stop:
+	@echo "Stopping SAUVC-RPI control-stack nodes..."
 	-@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
-		pkill -f '[s]imulation_control.launch.py' || true; \
-		pkill -f '[b]ottom_camera_pid_fbc_launch.py' || true; \
-		pkill -f '[d]epth_control_launch.py' || true; \
-		pkill -f '[w]rench_sum.launch.py' || true; \
-		pkill -f '[g]ui_node' || true; \
-		pkill -f '[s]upervisor_node' || true; \
-		pkill -f '[w]rench_sum_node' || true; \
-		pkill -f '[w]rench_to_individual_thrusters_output_forces_node' || true; \
-		pkill -f '[l]k_total_transform_node' || true; \
-		pkill -f '[g]eneric_pid_controller_node' || true; \
-		pkill -f '[b]ottom_camera_pid_bridge_node' || true; \
-		pkill -f '[w]aypoint_target_publisher' || true; \
-		pkill -f '[y]aw_reference_unwrapper_node' || true; \
-		pkill -f '[o]utput_sink_force_to_output_wrench_node' || true; \
-		pkill -f '[f]loat32_to_float64_converter_node' || true; \
-		pkill -f '[i]mu_to_orientation_node' || true; \
-		pkill -f '[b]ottom_camera_node' || true; \
-		pkill -f '[o]rca_bringup.launch.py' || true; \
-		pkill -f '[w]eb_video_server' || true; \
+		$(STOP_STACK); \
 		source /opt/ros/humble/setup.bash; \
-		ros2 daemon stop || true; \
-		sleep 1"
+		ros2 daemon stop || true"
 	@echo "Stopped."
+	@$(MAKE) --no-print-directory stack_status
+
+stack_status:
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		n=\$$(ps -eo cmd | grep -c '[r]pi_ros2_ws/install'); \
+		echo \"control-stack processes running: \$$n\"; \
+		if [ \"\$$n\" -gt 0 ]; then ps -eo pid,cmd | grep '[r]pi_ros2_ws/install' | awk '{print \$$1, \$$3}'; fi"
 
 sim_status:
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		echo '--- Nodes ---'; \
-		ros2 node list 2>/dev/null | sort -u | grep -E 'gui_node|supervisor_node|wrench_sum_node|wrench_to_individual|lk_total_transform|pid_controller|bottom_camera_pid_bridge|waypoint_target|yaw_reference|output_sink_force|float32_to_float64|imu_to_orientation|web_video_server' || true; \
+		ros2 node list 2>/dev/null | sort -u | grep -E 'gui_node|supervisor_node|wrench_sum_node|wrench_to_individual|pid_controller|output_sink_force|float32_to_float64|imu_to_orientation|web_video_server' || true; \
 		echo ''; \
 		echo '--- Key topics ---'; \
-		ros2 topic list | grep -E 'wrench_sources/(gui|bottom_camera|depth)|wrench_command|thruster_[0-7]/force_N|debug/tile_lines|camera/bottom/(image_raw|pose_px)|state/depth_m|targets/depth_m|system_manager/(mode|status)' || true; \
+		ros2 topic list | grep -E 'wrench_sources/(gui|depth|decision)|wrench_command|thruster_[0-7]/force_N|state/depth_m|targets/depth_m|system_manager/(mode|status)' || true; \
 		echo ''; \
 		echo '--- Lifecycle ---'; \
 		for node in \
@@ -335,16 +270,16 @@ sim_check:
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
 		$(ROS_SETUP) \
 		echo '=== GUI -> wrench_sum ==='; \
-		ros2 topic info -v /orca_auv/control/wrench_sources/gui || true; \
+		ros2 topic info -v /$(ORCA_NAMESPACE)/control/wrench_sources/gui || true; \
+		echo ''; \
+		echo '=== Autonomy (decision) -> wrench_sum ==='; \
+		ros2 topic info -v /$(ORCA_NAMESPACE)/control/wrench_sources/decision || true; \
 		echo ''; \
 		echo '=== wrench_sum -> allocator ==='; \
-		ros2 topic info -v /orca_auv/control/wrench_command || true; \
+		ros2 topic info -v /$(ORCA_NAMESPACE)/control/wrench_command || true; \
 		echo ''; \
 		echo '=== allocator -> simulation bridge ==='; \
-		ros2 topic info -v /orca_auv/thrusters/thruster_4/force_N || true; \
-		echo ''; \
-		echo '=== Tile-line debug ==='; \
-		timeout 5s ros2 topic hz /orca_auv/camera/bottom/debug/tile_lines --window 10 || true"
+		ros2 topic info -v /$(ORCA_NAMESPACE)/thrusters/thruster_4/force_N || true"
 
 sim_logs: compose_up
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
@@ -372,23 +307,49 @@ sim_thruster_allocator_detached: compose_up
 			--ros-args \
 			-r __ns:=/orca_auv"
 
-sim_lk_detached: compose_up
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
-		$(ROS_SETUP) \
-		ros2 run xy_control lk_total_transform_node \
-			--ros-args \
-			-r __ns:=/orca_auv \
-			-p publish_debug_image:=true \
-			-p image_topic:=camera/bottom/image_raw"
+# --------------------------------------------------------------------
+# 重構輔助：參數快照與 bag
+# --------------------------------------------------------------------
+.PHONY: dump_params snapshot bag_list bag_info
 
-sim_rqt_lk: sim_rqt_tile_lines
-
-sim_rqt_tile_lines: compose_up
-	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec orca /bin/bash -lc "\
+# 把執行中節點的參數全部 dump 回 YAML。
+# 池邊調了兩小時的成果不應該靠手抄 —— 調完先跑這個，再把值抄回 config。
+dump_params:
+	@mkdir -p $(SNAPSHOT_DIR)
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
 		$(ROS_SETUP) \
-		export XDG_RUNTIME_DIR=/tmp/runtime-root; \
-		mkdir -p \$$XDG_RUNTIME_DIR; \
-		chmod 700 \$$XDG_RUNTIME_DIR; \
-		export LIBGL_ALWAYS_SOFTWARE=1; \
-		export QT_X11_NO_MITSHM=1; \
-		rqt_image_view /orca_auv/camera/bottom/debug/tile_lines"
+		for n in \$$(ros2 node list 2>/dev/null | grep '^/$(ORCA_NAMESPACE)/' | LC_ALL=C sort -u); do \
+			echo \"# ===== \$$n =====\"; \
+			timeout 20 ros2 param dump \$$n 2>/dev/null || echo '#   (dump failed)'; \
+		done" > $(SNAPSHOT_DIR)/params.yaml
+	@echo "Wrote $(SNAPSHOT_DIR)/params.yaml ($$(grep -c '^# =====' $(SNAPSHOT_DIR)/params.yaml) nodes)"
+
+# 節點／topic／service 快照。重構期間用來跟 docs/baseline/ 做差集比對，
+# 確認刪掉的剛好就是預期要刪的，沒有非預期缺漏。
+snapshot:
+	@mkdir -p $(SNAPSHOT_DIR)
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) ros2 node list 2>/dev/null | LC_ALL=C sort -u" > $(SNAPSHOT_DIR)/nodes.txt
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) ros2 topic list 2>/dev/null | LC_ALL=C sort -u" > $(SNAPSHOT_DIR)/topics.txt
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) ros2 service list 2>/dev/null | LC_ALL=C sort -u" > $(SNAPSHOT_DIR)/services.txt
+	@echo "nodes=$$(wc -l < $(SNAPSHOT_DIR)/nodes.txt) topics=$$(wc -l < $(SNAPSHOT_DIR)/topics.txt) services=$$(wc -l < $(SNAPSHOT_DIR)/services.txt)"
+	@echo "Diff against baseline:  diff ../docs/baseline/nodes.txt $(SNAPSHOT_DIR)/nodes.txt"
+
+bag_list:
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		du -sh /root/bags/*/ 2>/dev/null | sort -k2 || echo '(no bags yet)'; \
+		echo ''; df -h /root/bags | tail -1"
+
+# 用法：make bag_info BAG=orca_20260803_101530（省略則取最新一包）
+# AUV 靠 kill switch 斷電時 metadata.yaml 不會寫出，先跑：
+#   ros2 bag reindex <bag_dir> -s mcap
+bag_info:
+	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
+		$(ROS_SETUP) \
+		d=\"\"; \
+		if [ -n \"$(BAG)\" ] && [ -d \"/root/bags/$(BAG)\" ]; then d=\"/root/bags/$(BAG)\"; \
+		else d=\$$(ls -dt /root/bags/*/ 2>/dev/null | head -1); fi; \
+		if [ -z \"\$$d\" ]; then echo '(no bags yet)'; exit 0; fi; \
+		echo \"bag: \$$d\"; ros2 bag info \"\$$d\""

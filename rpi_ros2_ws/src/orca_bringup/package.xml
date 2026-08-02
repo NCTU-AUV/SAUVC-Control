@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>orca_bringup</name>
+  <version>0.0.0</version>
+  <description>Orca AUV 載具控制堆疊的啟動與設定：所有 launch 檔與集中式參數的唯一來源。</description>
+  <maintainer email="dianyueguo@gmail.com">root</maintainer>
+  <license>TODO: License declaration</license>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>ros2bag</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+
+  <!-- 被本 package 的 launch 檔啟動的節點 -->
+  <exec_depend>control</exec_depend>
+  <exec_depend>depth_control</exec_depend>
+  <exec_depend>gui</exec_depend>
+  <exec_depend>stm32_manager</exec_depend>
+  <exec_depend>system_manager</exec_depend>
+  <exec_depend>thrusters</exec_depend>
+  <exec_depend>wrench_sum</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

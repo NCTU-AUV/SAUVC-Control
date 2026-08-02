@@ -12,13 +12,33 @@ services:
     environment:
       DISPLAY: ${HOST_DISPLAY:-host.docker.internal:0}
       XAUTHORITY: ${XAUTHORITY:-/tmp/.Xauthority}
+      # ROS / DDS 設定的唯一來源是 .env，不要在這裡寫死預設值以外的東西。
+      # FASTDDS_BUILTIN_TRANSPORTS 的預設值刻意設成 UDPv4：即使有人忘了帶
+      # .env，也不會落入「跨容器靜默失聯」那個最難查的失敗模式。
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       ROS_LOCALHOST_ONLY: ${ROS_LOCALHOST_ONLY:-0}
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-UDPv4}
+      ORCA_NAMESPACE: ${ORCA_NAMESPACE:-orca_auv}
+      ORCA_BAG_ROOT: /root/bags
     volumes:
       - /dev:/dev
       - ./rpi_ros2_ws:/root/rpi_ros2_ws
+      # build / install / log 用 named volume，不要讓它們落在 bind mount 裡。
+      # 否則 host 上跑過的 colcon build 會把寫死 host 路徑的 CMakeCache
+      # 留在共用目錄，導致容器內 build 直接失敗（且因為這些目錄被 gitignore，
+      # 沒有人會發現是怎麼壞的）。
+      - orca_build:/root/rpi_ros2_ws/build
+      - orca_install:/root/rpi_ros2_ws/install
+      - orca_log:/root/rpi_ros2_ws/log
       - ./SAUVC-STM32/build:/root/rpi_ros2_ws/stm32_binary
+      # bag 落地位置，獨立於 workspace 與系統碟
+      - ${ORCA_BAG_DIR:-./bags}:/root/bags
       - ${XAUTH_FILE:-/tmp/.Xauthority}:${XAUTHORITY:-/tmp/.Xauthority}:ro
     working_dir: /root
     command: ["/bin/bash", "-lc", "tail -f /dev/null"]
+
+volumes:
+  orca_build:
+  orca_install:
+  orca_log:
