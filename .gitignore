@@ -4,4 +4,11 @@ rpi_ros2_ws/log/
 rpi_ros2_ws/src/thrusters/thrusters/__pycache__/
 .vscode/
 *.pyc
+__pycache__/
 *.DS_Store
+
+# Bag 錄製輸出（ORCA_BAG_DIR 預設值）
+bags/
+
+# 重構期間的節點／topic 快照與 param dump
+snapshots/

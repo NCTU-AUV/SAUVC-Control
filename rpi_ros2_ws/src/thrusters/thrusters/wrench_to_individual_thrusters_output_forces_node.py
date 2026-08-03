@@ -1,10 +1,45 @@
-import rclpy
-from rclpy.node import Node
+"""把 6-DOF 的合力／合力矩解算成 8 顆推進器各自該出多少力。
 
-from geometry_msgs.msg import Wrench
-from std_msgs.msg import Float64
+推進器幾何來自參數（orca_bringup/config/hardware.yaml），不再硬編碼 ——
+改推進器配置或換載具時只要動 YAML。幾何參考 https://hackmd.io/@NCTU-auv/HkBgyB4a3
+
+飽和處理也在這裡，而不是只在 thruster_force_to_pwm_output_signal_node 裡：
+模擬路徑刻意跳過 PWM 轉換節點（力直接進 ros_gz_bridge），限幅若只寫在那裡，
+模擬就完全沒有飽和行為，調出來的增益搬到實機會對不上（見
+docs/SIMULATION_FINDINGS.md §1.3）。放在分配層之後、兩條路徑的共同節點上，
+模擬與實機才會有同一組飽和行為。PWM 節點自己的 clamp 保留為最後一道防線。
+"""
 
 import numpy as np
+import rclpy
+from geometry_msgs.msg import Wrench
+from rclpy.node import Node
+from std_msgs.msg import Float64
+
+THRUSTER_COUNT = 8
+
+# 預設幾何：位置 (x, y, z) 公尺、推力方向單位向量，依推進器編號 0..7 排列。
+_SQRT_HALF = float(np.cos(np.pi / 4))
+DEFAULT_THRUSTER_POSITIONS_M = [
+    0.12711, -0.25144, 0.0,   # 0  垂直
+    0.12711, 0.25144, 0.0,    # 1  垂直
+    -0.12711, -0.25144, 0.0,  # 2  垂直
+    -0.12711, 0.25144, 0.0,   # 3  垂直
+    0.32049, -0.2383, 0.0,    # 4  水平
+    0.32049, 0.2383, 0.0,     # 5  水平
+    -0.32049, -0.2383, 0.0,   # 6  水平
+    -0.32049, 0.2383, 0.0,    # 7  水平
+]
+DEFAULT_THRUSTER_DIRECTIONS = [
+    0.0, 0.0, 1.0,
+    0.0, 0.0, 1.0,
+    0.0, 0.0, 1.0,
+    0.0, 0.0, 1.0,
+    _SQRT_HALF, _SQRT_HALF, 0.0,
+    _SQRT_HALF, -_SQRT_HALF, 0.0,
+    _SQRT_HALF, -_SQRT_HALF, 0.0,
+    _SQRT_HALF, _SQRT_HALF, 0.0,
+]
 
 
 class WrenchToIndividualThrusterOutputForcesNode(Node):
@@ -12,81 +47,102 @@ class WrenchToIndividualThrusterOutputForcesNode(Node):
     def __init__(self):
         super().__init__('wrench_to_individual_thrusters_output_forces_node')
 
-        self.__set_output_force_subscribers = \
-            self.create_subscription(
-                msg_type=Wrench,
-                topic="control/wrench_command",
-                callback=self.__set_output_wrench_at_center_subscribers_callback,
-                qos_profile=10
-            )
+        positions_m = self._declare_geometry_parameter(
+            'thruster_positions_m', DEFAULT_THRUSTER_POSITIONS_M)
+        directions = self._declare_geometry_parameter(
+            'thruster_directions', DEFAULT_THRUSTER_DIRECTIONS)
 
-        self.__set_output_force_publishers = [
-            self.create_publisher(
-                msg_type=Float64,
-                topic=f"thrusters/{self.__get_thruster_name(thruster_number)}/force_N",
-                qos_profile=10
-            )
-            for thruster_number in range(8)
+        # 單顆推進器的出力上限（牛頓）。<= 0 代表停用限幅。
+        self._max_thruster_force_N = float(
+            self.declare_parameter('max_thruster_force_N', 0.0).value)
+        # 'scale'：任一顆超限時，全部等比例縮放，保留指令的方向，只是變慢。
+        # 'clip' ：各自獨立截斷，會扭曲合力方向（載具往非預期方向偏）。
+        self._saturation_mode = str(
+            self.declare_parameter('saturation_mode', 'scale').value).lower()
+        if self._saturation_mode not in ('scale', 'clip'):
+            self.get_logger().warn(
+                f"未知的 saturation_mode '{self._saturation_mode}'，改用 'scale'")
+            self._saturation_mode = 'scale'
+
+        self._output_force_allocation_matrix = self._create_allocation_matrix(
+            positions_m, directions)
+
+        self._saturated = False
+
+        self._output_force_publishers = [
+            self.create_publisher(Float64, f'thrusters/thruster_{n}/force_N', 10)
+            for n in range(THRUSTER_COUNT)
         ]
+        self._wrench_subscriber = self.create_subscription(
+            Wrench, 'control/wrench_command', self._wrench_callback, 10)
 
-        self.__output_force_allocation_matrix = self.__create_output_force_allocation_matrix()
+    def _declare_geometry_parameter(self, name, default):
+        values = list(self.declare_parameter(name, default).value)
+        if len(values) != THRUSTER_COUNT * 3:
+            self.get_logger().error(
+                f'{name} 需要 {THRUSTER_COUNT * 3} 個值（每顆推進器 3 個），'
+                f'實際收到 {len(values)} 個；改用預設幾何。'
+            )
+            values = list(default)
+        return np.array(values, dtype=float).reshape(THRUSTER_COUNT, 3)
 
-    def __get_thruster_name(self, thruster_number):
-        return f"thruster_{thruster_number}"
+    @staticmethod
+    def _create_allocation_matrix(positions_m, directions):
+        # 每一欄是一顆推進器對 [Fx Fy Fz Tx Ty Tz] 的貢獻，取偽逆解回各顆出力。
+        force_rows = directions.T
+        torque_rows = np.column_stack([
+            np.cross(positions_m[n], directions[n]) for n in range(THRUSTER_COUNT)
+        ])
+        return np.linalg.pinv(np.vstack((force_rows, torque_rows)))
 
-    def __create_output_force_allocation_matrix(self):
-        # Referencing https://hackmd.io/@NCTU-auv/HkBgyB4a3
+    def _apply_saturation(self, output_forces_N):
+        if self._max_thruster_force_N <= 0.0:
+            return output_forces_N
 
-        thrusters_profile = [
-            {"position_m": np.array([ 0.127_11, -0.251_44, 0.000]), "direction": np.array([0, 0, 1])}, # NO. 0
-            {"position_m": np.array([ 0.127_11,  0.251_44, 0.000]), "direction": np.array([0, 0, 1])}, # NO. 1
-            {"position_m": np.array([-0.127_11, -0.251_44, 0.000]), "direction": np.array([0, 0, 1])}, # NO. 2
-            {"position_m": np.array([-0.127_11,  0.251_44, 0.000]), "direction": np.array([0, 0, 1])}, # NO. 3
-            {"position_m": np.array([ 0.320_49, -0.238_3, 0.000]), "direction": np.array([np.sin(np.pi / 4),  np.cos(np.pi / 4), 0])}, # NO. 4
-            {"position_m": np.array([ 0.320_49,  0.238_3, 0.000]), "direction": np.array([np.sin(np.pi / 4), -np.cos(np.pi / 4), 0])}, # NO. 5
-            {"position_m": np.array([-0.320_49, -0.238_3, 0.000]), "direction": np.array([np.sin(np.pi / 4), -np.cos(np.pi / 4), 0])}, # NO. 6
-            {"position_m": np.array([-0.320_49,  0.238_3, 0.000]), "direction": np.array([np.sin(np.pi / 4),  np.cos(np.pi / 4), 0])}, # NO. 7
-        ]
+        peak = float(np.max(np.abs(output_forces_N)))
+        if peak <= self._max_thruster_force_N:
+            if self._saturated:
+                self._saturated = False
+                self.get_logger().info('推力已回到限幅範圍內')
+            return output_forces_N
 
-        inverse_allocation_matrix = np.vstack((
-            np.column_stack(tuple(thrusters_profile[thruster_number]["direction"] for thruster_number in range(8))),
-            np.column_stack(
-                tuple(np.cross(thrusters_profile[thruster_number]["position_m"], thrusters_profile[thruster_number]["direction"])
-                for thruster_number in range(8))),
-        ))
+        if not self._saturated:
+            self._saturated = True
+        self.get_logger().warn(
+            f'推力飽和：最大 {peak:.1f} N > 上限 {self._max_thruster_force_N:.1f} N',
+            throttle_duration_sec=2.0,
+        )
 
-        output_force_allocation_matrix = np.linalg.pinv(inverse_allocation_matrix)
+        if self._saturation_mode == 'scale':
+            return output_forces_N * (self._max_thruster_force_N / peak)
+        return np.clip(
+            output_forces_N, -self._max_thruster_force_N, self._max_thruster_force_N)
 
-        return output_force_allocation_matrix
+    def _wrench_callback(self, msg):
+        wrench_N_Nm = np.array([
+            msg.force.x, msg.force.y, msg.force.z,
+            msg.torque.x, msg.torque.y, msg.torque.z,
+        ])
 
-    def __set_thruster_output_force(self, thruster_number, output_force_N):
-        set_output_force_N = Float64()
-        set_output_force_N.data = output_force_N
-        self.__set_output_force_publishers[thruster_number].publish(set_output_force_N)
+        output_forces_N = self._apply_saturation(
+            self._output_force_allocation_matrix @ wrench_N_Nm)
 
-    def __set_output_wrench_at_center_subscribers_callback(self, msg):
-        wrench_N_Nm = np.array([msg.force.x,
-                                msg.force.y,
-                                msg.force.z,
-                                msg.torque.x,
-                                msg.torque.y,
-                                msg.torque.z])
-
-        output_forces_N = self.__output_force_allocation_matrix @ wrench_N_Nm
-
-        for thruster_number in range(8):
-            self.__set_thruster_output_force(thruster_number, output_forces_N[thruster_number])
+        for n in range(THRUSTER_COUNT):
+            out = Float64()
+            out.data = float(output_forces_N[n])
+            self._output_force_publishers[n].publish(out)
 
 
 def main(args=None):
     rclpy.init(args=args)
-
-    wrench_to_individual_thrusters_output_forces_node = WrenchToIndividualThrusterOutputForcesNode()
-
-    rclpy.spin(wrench_to_individual_thrusters_output_forces_node)
-
-    wrench_to_individual_thrusters_output_forces_node.destroy_node()
-    rclpy.shutdown()
+    node = WrenchToIndividualThrusterOutputForcesNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 import os
-from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'depth_control'
@@ -12,13 +12,12 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='TODO: Package description',
+    description='深度軸：把 PID 的下沉力轉成 wrench 匯流排上的一路來源',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -27,8 +26,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            "float32_to_float64_converter_node = depth_control.float32_to_float64_converter_node:main",
-            "imu_to_orientation_node = depth_control.imu_to_orientation_node:main",
             "output_sink_force_to_output_wrench_node = depth_control.output_sink_force_to_output_wrench_node:main",
         ],
     },

@@ -1,0 +1,77 @@
+# =============================================================================
+# 控制參數 —— 會反覆調適的東西都在這裡
+# =============================================================================
+# 這份檔案是控制參數的唯一來源。不要再把數值寫進 launch 檔或節點預設值裡：
+# 過去 depth_force_bias_N 就同時存在節點預設 5.0 與 launch 的 10.0 兩份，
+# 而 wrench_sum 的設定散在三個地方且內容互不一致。
+#
+# ---- 命名空間的坑 ----
+# key 必須是「含 namespace 的完整節點名」。本專案的 namespace 是 launch 參數
+# （預設 orca_auv），所以一律用 /** 萬用字元，否則換 namespace 會整份靜默失效
+# —— 參數不會報錯，只會回落到節點內建預設值，PID 增益直接變 0。
+# 改完務必用 `make dump_params` 確認實際生效的值。
+#
+# ---- 兩類參數 ----
+#   熱調   ：每個控制迴圈重新讀取，`ros2 param set` 立即生效。池邊調參的命脈。
+#   開機讀 ：建構時讀一次，改了要重啟節點。下面逐項標註。
+# -----------------------------------------------------------------------------
+
+# --- 深度 PID -----------------------------------------------------------------
+/**/depth_pid_controller_node:
+  ros__parameters:
+    # 熱調
+    proportional_gain: 40.0
+    integral_gain: 3.0
+    derivative_gain: 12.0
+    # 0.0 = 不平滑，直接對原始誤差微分。深度訊號有雜訊時可往上調（0～1）。
+    derivative_smoothing_factor: 0.0
+
+    # 積分抗飽和與輸出限幅（熱調，<= 0 代表停用）。
+    # 為什麼需要：載具觸底／卡住時誤差恆定不為零，積分項會無上界成長。
+    # 實測 45 秒內下沉力從 32 N 爬到 119 N 且仍在爬。
+    # 取值依據：垂直軸有 4 顆推進器，單顆上限 15 N（見 hardware.yaml），
+    # 所以 z 軸總出力上限約 60 N；積分項給總量的一半。
+    integral_limit: 30.0
+    output_limit: 60.0
+
+    # 開機讀
+    controller_loop_timer_period_s: 0.01
+
+# --- 深度力 → wrench 匯流排 ---------------------------------------------------
+/**/output_sink_force_to_output_wrench_node:
+  ros__parameters:
+    # 熱調。抵銷淨浮力用的常數偏壓，正值向下。
+    depth_force_bias_N: 10.0
+    # 是否依 IMU 姿態把下沉力轉到載具座標系。false 時直接當作 +z。
+    use_sink_force_direction: false
+
+# --- Wrench 匯流排 ------------------------------------------------------------
+/**/wrench_sum_node:
+  ros__parameters:
+    # 全部開機讀（節點在建構時就要建立訂閱）。
+    #
+    # 每個來源有獨立 timeout：來源停止發布時該來源歸零，而不是保留殘留力，
+    # 避免載具在感測器斷線後仍被舊力矩推著跑。
+    input_topics:
+      - control/wrench_sources/gui       # GUI 手動
+      - control/wrench_sources/depth     # 深度 PID
+      - control/wrench_sources/decision  # Autonomy 堆疊（SAUVC-JETSON）
+    output_topic: control/wrench_command
+    publish_rate: 30.0
+    source_timeout_s: 0.5
+
+# --- 系統管理 -----------------------------------------------------------------
+/**/supervisor_node:
+  ros__parameters:
+    # 安全前提（開機讀 + 執行期由 SafetyMonitor 查詢，可用 param set 調整）
+    require_not_killed: true
+    require_thrusters_enabled: true
+    depth_sensor_timeout_s: 1.0
+    # AUTONOMOUS 模式下，decision wrench 超過這個時間沒更新就進 FAULT。
+    # 沒有這個檢查的話，Autonomy 掛掉只會讓 wrench_sum 靜默把來源歸零，
+    # 載具停住但沒有任何人知道為什麼。
+    decision_timeout_s: 1.0
+
+    auto_flash_stm32_on_startup: true
+    stm32_flash_service: /flash_stm32
+    stm32_flash_service_timeout_s: 15.0

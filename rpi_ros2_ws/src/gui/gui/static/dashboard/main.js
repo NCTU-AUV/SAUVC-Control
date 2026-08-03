@@ -108,12 +108,6 @@ websocket.onmessage = (event) => {
         if (msg_json_object.data.topic_name == protocol.topics.depthPidParams) {
             syncPidParamDisplay("depth_pid", msg_json_object.data.msg || {});
         }
-        if (msg_json_object.data.topic_name == protocol.topics.bottomCameraPidParams) {
-            const paramsByAxis = msg_json_object.data.msg || {};
-            ["x", "y", "yaw"].forEach((axis) => {
-                syncPidParamDisplay(`bottom_camera_${axis}_pid`, paramsByAxis[axis]);
-            });
-        }
         if (msg_json_object.data.topic_name == protocol.topics.thrustersPwmUs) {
             const pwmValues = msg_json_object.data.msg || [];
             for (let i = 0; i < 8; i += 1) {
@@ -168,56 +162,6 @@ websocket.onmessage = (event) => {
                 element.innerHTML = message ? `${successText}: ${message}` : successText;
             }
         }
-        if (msg_json_object.data.topic_name == protocol.topics.moveToPointStatus) {
-            const status = msg_json_object.data.msg || {};
-            const element = document.getElementById("move_to_point_status");
-            if (element) {
-                let text = status.state || "unknown";
-                if (status.message) {
-                    text += `: ${status.message}`;
-                }
-                if (typeof status.progress === "number") {
-                    text += ` (${Math.round(status.progress * 100)}%)`;
-                }
-                if (typeof status.remaining_distance_px === "number") {
-                    text += ` remaining ${status.remaining_distance_px.toFixed(1)} px`;
-                }
-                element.innerHTML = text;
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.bottomCameraPoseResetStatus) {
-            const status = msg_json_object.data.msg || {};
-            const element = document.getElementById("bottom_camera_pose_reset_status");
-            if (element) {
-                const successText = status.success === true ? "success" : "failed";
-                element.innerHTML = status.message ? `${successText}: ${status.message}` : successText;
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.bottomCameraTopicStats) {
-            const stats = msg_json_object.data.msg || {};
-            const lkPoseHzElement = document.getElementById("bottom_camera_pose_hz");
-            if (lkPoseHzElement) {
-                lkPoseHzElement.innerHTML = formatOptionalDisplayNumber(stats.lk_pose_hz, 2);
-            }
-            const yawHzElement = document.getElementById("bottom_camera_yaw_hz");
-            if (yawHzElement) {
-                yawHzElement.innerHTML = formatOptionalDisplayNumber(stats.yaw_hz, 2);
-            }
-            const imageRawHzElement = document.getElementById("bottom_camera_image_raw_hz");
-            if (imageRawHzElement) {
-                imageRawHzElement.innerHTML = formatOptionalDisplayNumber(stats.image_raw_hz, 2);
-            }
-            const imageSizeElement = document.getElementById("bottom_camera_image_size");
-            if (imageSizeElement) {
-                const width = Number(stats.image_width);
-                const height = Number(stats.image_height);
-                if (Number.isFinite(width) && Number.isFinite(height)) {
-                    imageSizeElement.innerHTML = `${width} x ${height}`;
-                } else {
-                    imageSizeElement.innerHTML = "none";
-                }
-            }
-        }
         if (msg_json_object.data.topic_name == protocol.topics.stm32Log) {
             const element = document.getElementById("stm32_debug_log");
             if (element) {
@@ -235,22 +179,6 @@ websocket.onmessage = (event) => {
             }
         }
 
-        const bottomCameraPidTopicElements = {
-            [protocol.topics.bottomCameraPidXReferencePx]: "bottom_camera_pid_x_reference_px",
-            [protocol.topics.bottomCameraPidYReferencePx]: "bottom_camera_pid_y_reference_px",
-            [protocol.topics.bottomCameraYawTargetRad]: "bottom_camera_yaw_target_rad",
-            [protocol.topics.bottomCameraPidYawReferenceRad]: "bottom_camera_pid_yaw_reference_rad",
-            [protocol.topics.bottomCameraPidXFeedbackPx]: "bottom_camera_pid_x_feedback_px",
-            [protocol.topics.bottomCameraPidYFeedbackPx]: "bottom_camera_pid_y_feedback_px",
-            [protocol.topics.bottomCameraPidYawFeedbackRad]: "bottom_camera_pid_yaw_feedback_rad",
-        };
-        const bottomCameraPidElementId = bottomCameraPidTopicElements[msg_json_object.data.topic_name];
-        if (bottomCameraPidElementId) {
-            const element = document.getElementById(bottomCameraPidElementId);
-            if (element) {
-                element.innerHTML = formatDisplayNumber(msg_json_object.data.msg, 2);
-            }
-        }
     }
 };
 
@@ -258,43 +186,8 @@ websocket.onopen = (event) => {
     console.log("websocket.onopen");
 };
 
-function send_process_action(target, action) {
-    websocket.send(JSON.stringify(protocol.makeProcessMessage(target, action)));
-}
-
 function send_controller_action(group, action) {
     websocket.send(JSON.stringify(protocol.makeControllerMessage(group, action)));
-}
-
-function enable_bottom_camera_pid_fbc() {
-    send_controller_action(
-        protocol.controllerGroups.bottomCameraPidFbc,
-        protocol.controllerActions.enable
-    );
-}
-
-function disable_bottom_camera_pid_fbc() {
-    send_controller_action(
-        protocol.controllerGroups.bottomCameraPidFbc,
-        protocol.controllerActions.disable
-    );
-}
-
-function reset_bottom_camera_pid_fbc() {
-    send_controller_action(
-        protocol.controllerGroups.bottomCameraPidFbc,
-        protocol.controllerActions.reset
-    );
-}
-
-function reset_bottom_camera_pose_button_onclick() {
-    const element = document.getElementById("bottom_camera_pose_reset_status");
-    if (element) {
-        element.innerHTML = "resetting...";
-    }
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.resetBottomCameraPose
-    )));
 }
 
 function enable_depth_control() {
@@ -330,6 +223,18 @@ function set_supervisor_manual_mode(enabled) {
         protocol.actions.setSupervisorManualMode,
         {enabled: enabled}
     )));
+}
+
+function set_supervisor_autonomous_mode(enabled) {
+    websocket.send(JSON.stringify(protocol.makeActionMessage(
+        protocol.actions.setSupervisorAutonomousMode,
+        {enabled: Boolean(enabled)}
+    )));
+}
+
+function supervisor_autonomous_mode_input_onchange() {
+    const checkbox = document.getElementById("supervisor_autonomous_mode_input");
+    set_supervisor_autonomous_mode(Boolean(checkbox && checkbox.checked));
 }
 
 function supervisor_manual_mode_input_onchange() {
@@ -379,71 +284,6 @@ function set_depth_pid_params_button_onclick() {
                 derivative_smoothing_factor: smoothing,
             }
         }
-    )));
-}
-
-function set_bottom_camera_pid_params_button_onclick(axis) {
-    const prefix = `bottom_camera_${axis}_pid`;
-    const p = document.getElementById(`${prefix}_p_input`).value;
-    const i = document.getElementById(`${prefix}_i_input`).value;
-    const d = document.getElementById(`${prefix}_d_input`).value;
-    const smoothing = document.getElementById(`${prefix}_smoothing_input`).value;
-
-    websocket.send(JSON.stringify(protocol.makeControllerMessage(
-        protocol.controllerGroups.bottomCameraPidFbc,
-        protocol.controllerActions.setPidParams,
-        {
-            params: {
-                axis: axis,
-                proportional_gain: p,
-                integral_gain: i,
-                derivative_gain: d,
-                derivative_smoothing_factor: smoothing,
-            }
-        }
-    )));
-}
-
-function move_to_point_button_onclick() {
-    const x_px = document.getElementById("move_to_point_x_px_input").value;
-    const y_px = document.getElementById("move_to_point_y_px_input").value;
-    const speed_px_s = document.getElementById("move_to_point_speed_px_s_input").value;
-    const statusElement = document.getElementById("move_to_point_status");
-
-    if (statusElement) {
-        statusElement.innerHTML = "sending...";
-    }
-
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.moveToPoint,
-        {
-            x_px: x_px,
-            y_px: y_px,
-            speed_px_s: speed_px_s,
-        }
-    )));
-}
-
-function publish_bottom_camera_yaw_target_rad(yaw_rad) {
-    websocket.send(JSON.stringify(protocol.makeTopicMessage(
-        protocol.topics.bottomCameraYawTargetRad,
-        {data: yaw_rad}
-    )));
-}
-
-function set_bottom_camera_yaw_target_rad_button_onclick() {
-    const yaw_rad = document.getElementById("bottom_camera_yaw_target_rad_input").value;
-    publish_bottom_camera_yaw_target_rad(yaw_rad);
-}
-
-function set_bottom_camera_yaw_target_deg_button_onclick() {
-    const yaw_deg = document.getElementById("bottom_camera_yaw_target_deg_input").value;
-    publish_bottom_camera_yaw_target_rad(Number(yaw_deg) * Math.PI / 180.0);
-}
-
-function cancel_move_to_point_button_onclick() {
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.cancelMoveToPoint
     )));
 }
 

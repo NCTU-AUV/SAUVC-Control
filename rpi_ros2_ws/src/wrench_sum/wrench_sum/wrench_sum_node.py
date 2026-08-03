@@ -11,9 +11,11 @@ class WrenchSum(LifecycleNode):
 
         # --- 1. Declare parameters ---
         # Default input topic list (modify in launch file)
+        # 節點預設值只是保底，實際清單一律由 launch 指定（見 orca_bringup）。
         self.declare_parameter('input_topics', [
             'control/wrench_sources/gui',
-            'control/wrench_sources/bottom_camera',
+            'control/wrench_sources/depth',
+            'control/wrench_sources/decision',
         ])
         # Output topic name
         self.declare_parameter('output_topic', 'control/wrench_command')
