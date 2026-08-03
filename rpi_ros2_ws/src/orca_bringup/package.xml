@@ -15,6 +15,7 @@
 
   <!-- 被本 package 的 launch 檔啟動的節點 -->
   <exec_depend>control</exec_depend>
+  <exec_depend>sensors</exec_depend>
   <exec_depend>depth_control</exec_depend>
   <exec_depend>gui</exec_depend>
   <exec_depend>stm32_manager</exec_depend>

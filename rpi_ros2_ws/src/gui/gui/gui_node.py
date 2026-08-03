@@ -1,7 +1,4 @@
 import json
-import os
-import signal
-import subprocess
 
 import rclpy
 from rclpy.node import Node
@@ -147,6 +144,14 @@ class GUINode(Node):
                 Trigger,
                 "system_manager/disable/depth_hold",
             ),
+            protocol.SUPERVISOR_SERVICE_AUTONOMOUS: self.create_client(
+                Trigger,
+                "system_manager/set_mode/autonomous",
+            ),
+            protocol.SUPERVISOR_SERVICE_DISABLE_AUTONOMOUS: self.create_client(
+                Trigger,
+                "system_manager/disable/autonomous",
+            ),
         }
 
         self._pwm_output_signal_value_subscription = self.create_subscription(
@@ -189,14 +194,6 @@ class GUINode(Node):
             protocol.TOPIC_TARGET_DEPTH_M,
             10,
         )
-        self._process_commands = {
-            protocol.PROCESS_DEPTH_CONTROL_LAUNCH: [
-                "ros2", "launch", "depth_control", "depth_control_launch.py",
-                f"namespace:={self._robot_namespace}",
-            ],
-        }
-        self._processes = {}
-
         self._controller_group_axes = {
             protocol.CONTROLLER_GROUP_DEPTH_CONTROL: dict(
                 self._pid_param_groups["depth"]["nodes"]
@@ -352,6 +349,11 @@ class GUINode(Node):
                 self._flash_stm32()
             elif action_name == protocol.ACTION_SET_SUPERVISOR_SIMULATION_MODE:
                 self._set_supervisor_simulation_mode(bool(msg_data.get("enabled")))
+            elif action_name == protocol.ACTION_SET_SUPERVISOR_AUTONOMOUS_MODE:
+                if bool(msg_data.get("enabled")):
+                    self._call_supervisor(protocol.SUPERVISOR_SERVICE_AUTONOMOUS)
+                else:
+                    self._call_supervisor(protocol.SUPERVISOR_SERVICE_DISABLE_AUTONOMOUS)
             elif action_name == protocol.ACTION_SET_SUPERVISOR_MANUAL_MODE:
                 if bool(msg_data.get("enabled")):
                     self._call_supervisor(protocol.SUPERVISOR_SERVICE_MANUAL)
@@ -423,18 +425,6 @@ class GUINode(Node):
                     msg.data = electromagnet_set_on
                     self._electromagnet_set_on_publisher.publish(msg)
 
-        if msg_type == protocol.TYPE_PROCESS:
-            target = msg_data.get(protocol.FIELD_TARGET)
-            action = msg_data.get(protocol.FIELD_ACTION)
-            if not target or target not in self._process_commands:
-                self.get_logger().warning(f"Unknown process target: {msg_data}")
-            elif action == protocol.PROCESS_ACTION_START:
-                self._start_process(target)
-            elif action in (protocol.PROCESS_ACTION_STOP, protocol.PROCESS_ACTION_KILL):
-                self._stop_process(target)
-            else:
-                self.get_logger().warning(f"Unknown process action: {msg_data}")
-
         if msg_type == protocol.TYPE_CONTROLLER:
             group = msg_data.get(protocol.FIELD_GROUP)
             action = msg_data.get(protocol.FIELD_ACTION)
@@ -450,63 +440,6 @@ class GUINode(Node):
 
         if msg_type not in protocol.MESSAGE_TYPES:
             self.get_logger().warning(f"Unknown message type: {msg_json_object}")
-
-    def destroy_node(self):
-        self._stop_all_processes()
-        return super().destroy_node()
-
-    def _start_process(self, name: str):
-        process = self._processes.get(name)
-        if process and process.poll() is None:
-            self.get_logger().info(f"{name} already running with pid {process.pid}")
-            return
-
-        cmd = self._process_commands.get(name)
-        if not cmd:
-            self.get_logger().warning(f"No command configured for {name}")
-            return
-
-        try:
-            preexec_fn = os.setsid if hasattr(os, "setsid") else None
-            process = subprocess.Popen(cmd, preexec_fn=preexec_fn)
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f"Failed to start {name}: {exc}")
-            return
-
-        self._processes[name] = process
-        self.get_logger().info(f"Started {name} (pid {process.pid})")
-
-    def _stop_process(self, name: str):
-        process = self._processes.get(name)
-        if not process:
-            self.get_logger().info(f"No running process tracked for {name}")
-            return
-
-        if process.poll() is not None:
-            self.get_logger().info(f"{name} already exited with code {process.returncode}")
-            self._processes.pop(name, None)
-            return
-
-        try:
-            if hasattr(os, "killpg"):
-                os.killpg(os.getpgid(process.pid), signal.SIGINT)
-            else:
-                process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                if hasattr(os, "killpg"):
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                else:
-                    process.kill()
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().error(f"Failed to stop {name}: {exc}")
-        finally:
-            self._processes.pop(name, None)
-
-    def _stop_all_processes(self):
-        for name in list(self._processes.keys()):
-            self._stop_process(name)
 
     def _flash_stm32(self):
         if not self._flash_stm32_client.service_is_ready():

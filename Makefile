@@ -47,7 +47,7 @@ RMW_IMPLEMENTATION ?= rmw_fastrtps_cpp
 # 見 .env 的說明：這是正確性設定，不是效能調校。
 FASTDDS_BUILTIN_TRANSPORTS ?= UDPv4
 ORCA_NAMESPACE ?= orca_auv
-ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST_ONLY) RMW_IMPLEMENTATION=$(RMW_IMPLEMENTATION) FASTDDS_BUILTIN_TRANSPORTS=$(FASTDDS_BUILTIN_TRANSPORTS)
+ROS_NET_ENV := ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) ROS_LOCALHOST_ONLY=$(ROS_LOCALHOST_ONLY) RMW_IMPLEMENTATION=$(RMW_IMPLEMENTATION) FASTDDS_BUILTIN_TRANSPORTS=$(FASTDDS_BUILTIN_TRANSPORTS) ORCA_NAMESPACE=$(ORCA_NAMESPACE) ORCA_STM32_PORT=$(ORCA_STM32_PORT)
 BRINGUP_LOG ?= /tmp/orca_bringup.log
 SNAPSHOT_DIR ?= snapshots
 
@@ -119,7 +119,7 @@ launch: compose_up
 		source /opt/ros/humble/setup.bash && \
 		source /root/uros_ws/install/local_setup.bash && \
 		source install/setup.bash && \
-		ros2 launch src/launch/orca_bringup.launch.py"
+		ros2 launch orca_bringup bringup.launch.py"
 
 launch_detached: compose_up
 	@echo "Launching ROS stack in detached mode"
@@ -130,7 +130,7 @@ launch_detached: compose_up
 		source install/setup.bash && \
 		rm -f $(BRINGUP_LOG); \
 		echo \"Starting orca_bringup at \$$(date -Is)\" > $(BRINGUP_LOG); \
-		exec ros2 launch src/launch/orca_bringup.launch.py >> $(BRINGUP_LOG) 2>&1"
+		exec ros2 launch orca_bringup bringup.launch.py >> $(BRINGUP_LOG) 2>&1"
 
 launch_logs: compose_start
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -T orca /bin/bash -lc "\
@@ -195,8 +195,7 @@ sim_launch_detached: compose_up
 	@echo "Starting simulation launch: GUI, tile-line tracking, supervisor, controllers, wrench sum, thruster force allocator..."
 	@HOST_DISPLAY=$(HOST_DISPLAY) XAUTH_FILE=$(XAUTH_FILE) XAUTHORITY=$(XAUTHORITY) $(ROS_NET_ENV) $(COMPOSE) exec -d orca /bin/bash -lc "\
 		$(ROS_SETUP) \
-		exec ros2 launch src/launch/simulation_control.launch.py \
-			namespace:=$(ORCA_NAMESPACE) \
+		exec ros2 launch orca_bringup bringup.launch.py sim:=true \
 			> /tmp/sauvc_rpi_sim_control.log 2>&1"
 	@echo "Waiting for lifecycle services..."
 	@sleep 4

@@ -7,7 +7,6 @@ const GuiProtocol = Object.freeze({
         topicName: "topic_name",
         msg: "msg",
         actionName: "action_name",
-        target: "target",
         action: "action",
         group: "group",
         params: "params",
@@ -15,7 +14,6 @@ const GuiProtocol = Object.freeze({
     types: Object.freeze({
         action: "action",
         topic: "topic",
-        process: "process",
         controller: "controller",
     }),
     actions: Object.freeze({
@@ -23,12 +21,7 @@ const GuiProtocol = Object.freeze({
         flashStm32: "flash_stm32",
         setSupervisorSimulationMode: "set_supervisor_simulation_mode",
         setSupervisorManualMode: "set_supervisor_manual_mode",
-    }),
-    processTargets: Object.freeze({}),
-    processActions: Object.freeze({
-        start: "start",
-        stop: "stop",
-        kill: "kill",
+        setSupervisorAutonomousMode: "set_supervisor_autonomous_mode",
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",
@@ -71,15 +64,6 @@ const GuiProtocol = Object.freeze({
             data: {
                 ...data,
                 action_name: actionName,
-            },
-        };
-    },
-    makeProcessMessage(target, action) {
-        return {
-            type: this.types.process,
-            data: {
-                target: target,
-                action: action,
             },
         };
     },

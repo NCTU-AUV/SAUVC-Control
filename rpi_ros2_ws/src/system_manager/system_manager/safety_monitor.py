@@ -9,6 +9,7 @@ class SafetyMonitor:
         self.thrusters_enabled = False
         self.have_thrusters_enabled = False
         self.last_depth_stamp = None
+        self.last_decision_stamp = None
 
     def update_killed(self, killed: bool):
         self.killed = killed
@@ -20,6 +21,9 @@ class SafetyMonitor:
 
     def update_depth(self):
         self.last_depth_stamp = self._node.get_clock().now()
+
+    def update_decision(self):
+        self.last_decision_stamp = self._node.get_clock().now()
 
     def safety_ready(self):
         if self._require_not_killed():
@@ -45,6 +49,20 @@ class SafetyMonitor:
             return False, "Depth sensor data has not been received"
         if self._age_s(self.last_depth_stamp) > timeout_s:
             return False, "Depth sensor data is stale"
+        return True, ""
+
+    def decision_ready(self):
+        """Autonomy 堆疊的 wrench 來源是否還活著。
+
+        wrench_sum 本身有 source_timeout_s，來源斷線時會把該來源歸零 ——
+        但那是靜默的，載具只是不動，操作者看不出發生什麼事。
+        在 AUTONOMOUS 模式下這件事必須升級成 FAULT。
+        """
+        timeout_s = float(self._node.get_parameter("decision_timeout_s").value)
+        if self.last_decision_stamp is None:
+            return False, "Decision wrench has not been received"
+        if self._age_s(self.last_decision_stamp) > timeout_s:
+            return False, "Decision wrench is stale"
         return True, ""
 
     def _require_not_killed(self):

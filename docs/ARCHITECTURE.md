@@ -1,367 +1,372 @@
-# SAUVC-RPI 架構文件（Architecture）
+# 架構文件（Architecture）
 
-本文件說明 SAUVC-RPI 這個 ROS 2 workspace（`rpi_ros2_ws`）的系統架構，依邏輯分層（感知、控制、致動、系統管理）介紹各 package 的職責、node、topic、service、action 與訊息型別（message type），並補上每一層「為什麼這樣設計」的動機說明。環境安裝與啟動指令請參考 [README.md](../README.md)，這份文件專注在「系統怎麼運作」。
+本文說明這個 ROS 2 workspace（`rpi_ros2_ws`）**怎麼運作**：各 package 的職責、
+node、topic、service、訊息型別，以及每一層「為什麼這樣設計」。安裝與啟動指令
+在 [README.md](../README.md)。
 
-假設讀者已具備 ROS 2 基礎（node / topic / service / action / QoS / launch 系統），不會重新介紹這些概念；但對 Lifecycle Node、開迴路軌跡產生器（open-loop trajectory generator）這類本專案特有的設計，會補充設計動機。所有 topic 名稱皆為 remap 前、各 package 內宣告的相對名稱；執行時會依 `orca_bringup.launch.py` 的 remap，並包在 launch 的 `namespace` 參數（預設 `orca_auv`）之下，例如 `control/wrench_command` 實際上是 `/orca_auv/control/wrench_command`。
+假設讀者具備 ROS 2 基礎（node / topic / service / QoS / launch）；對 Lifecycle
+Node、wrench 匯流排這類本專案特有的設計會補充動機。
+
+所有 topic 名稱皆為 remap 前的相對名稱，執行時包在 launch 的 `namespace` 參數
+（預設 `orca_auv`）之下 —— 例如 `control/wrench_command` 實際上是
+`/orca_auv/control/wrench_command`。
 
 ## 目錄
 
-1. [專案總覽與硬體平台](#1-專案總覽與硬體平台)
-2. [系統分層與核心設計：Wrench 匯流排](#2-系統分層與核心設計wrench-匯流排)
-3. [感知層 Perception](#3-感知層-perception)
-4. [控制層：PID 控制 Control](#4-控制層pid-控制-control)
-5. [致動層：加總與分配 Aggregation & Allocation](#5-致動層加總與分配-aggregation--allocation)
-6. [系統管理 System Management](#6-系統管理-system-management)
-7. [訊息介面定義：xy_translation_control_interfaces](#7-訊息介面定義xy_translation_control_interfaces)
-8. [感測器／推進器韌體介面邊界：SAUVC-STM32](#8-感測器推進器韌體介面邊界sauvc-stm32)
-9. [模擬環境：SAUVC-Simulation](#9-模擬環境sauvc-simulation)
-10. [建置與啟動流程](#10-建置與啟動流程)
-11. [已知問題與待清理事項](#11-已知問題與待清理事項)
+1. [定位與邊界](#1-定位與邊界)
+2. [核心設計：wrench 匯流排](#2-核心設計wrench-匯流排)
+3. [感測層 sensors](#3-感測層-sensors)
+4. [控制層 control / depth_control](#4-控制層-control--depth_control)
+5. [致動層 wrench_sum / thrusters](#5-致動層-wrench_sum--thrusters)
+6. [系統管理 system_manager](#6-系統管理-system_manager)
+7. [操作介面 gui](#7-操作介面-gui)
+8. [啟動與設定 orca_bringup](#8-啟動與設定-orca_bringup)
+9. [外部邊界](#9-外部邊界)
+10. [已知問題](#10-已知問題)
 
 ---
 
-## 1. 專案總覽與硬體平台
+## 1. 定位與邊界
 
-Orca 是參加 SAUVC（Singapore AUV Challenge）的水下機器人（AUV, Autonomous Underwater Vehicle）。本 repo 是跑在**樹莓派（Raspberry Pi）**上的控制堆疊（control stack），透過序列埠與一顆 **STM32F4** 韌體板連接，兩者用 micro-ROS 串接進同一個 ROS 2 graph（STM32 端負責讀取壓力/IMU 感測器與輸出推進器 PWM，是本 repo 之外的獨立 submodule，見第 8 節）。
+這個 repo 是 Orca AUV 的**載具控制堆疊**：把「目標」變成「推進器出力」。
 
-本 repo 涵蓋的範圍：底部相機視覺伺服（visual servoing）、深度定深（depth hold）、PID 控制、力的加總與推力分配（thrust allocation）、系統模式與安全管理、Web GUI。**不涵蓋**語意層級的物件偵測或任務規劃（不像姊妹 repo `SAUVC-JETSON` 有 YOLO 物件偵測與 Behavior Tree 決策層）——本 repo 目前唯一的自主任務邏輯是 `dive_then_forward_mission_node` 這一個顯式狀態機（見 6.4 節），`control/wrench_sources/decision` 這個 topic 是特意保留給未來高層決策模組的介面，目前沒有節點在發布。
+它**不做**物件偵測、不做任務規劃 —— 那些在姊妹 repo `SAUVC-JETSON`
+（感知 + BehaviorTree 決策，本文以下稱 Autonomy 堆疊）。兩者跑在同一塊
+Jetson Orin NX 上的兩個獨立 container，只透過 ROS 2 topic 溝通。
 
-## 2. 系統分層與核心設計：Wrench 匯流排
+維持兩個 container 而非合併的理由：base image 無法調和（CUDA devel + Isaac ROS
+全家桶 vs 乾淨的 `ros:humble`）；改動頻率差距極大（控制堆疊天天調參，Isaac
+映像半年不動）；故障隔離（感知 OOM / GPU 異常不該拖垮推進器控制）。
 
-```
-感知/感測層              控制層 Control                        致動層 Actuation                系統管理
-──────────              ──────────────                        ──────────────                  ──────────
-底部相機 → LK 光流   ┐                                                                          supervisor_node
-STM32 壓力/IMU  ─────┼→ state/* → PID(depth/x/y/yaw) → wrench_sources/* → wrench_sum → 推力分配 → PWM → STM32   (Lifecycle 啟停
-GUI 手動輸入     ────┘                                                                            + 安全門檻)
-                                                                                                     ↑
-                                                                                    gui_node / mission node 呼叫 service+action
-```
+**外部介面**（本 repo 是訂閱端）：
 
-| 層 | 對應 package | 角色 |
+| Topic | 型別 | 來源 |
 |---|---|---|
-| 感知/感測 | `bottom_camera`, `xy_control`（`lk_total_transform_node`）, `depth_control`（轉接節點） | 相機影像追蹤、感測器格式轉換 |
-| 控制 | `control`（通用 PID）, `xy_control`, `depth_control` | 把回饋誤差轉成力/力矩 |
-| 致動 | `wrench_sum`, `thrusters` | 力的加總、6-DOF → 8 推進器分配、PWM 輸出 |
-| 系統管理 | `system_manager`, `gui`, `stm32_manager` | 模式狀態機、安全門檻、Web 操作介面、韌體燒錄 |
-| 介面定義 | `xy_translation_control_interfaces` | `MoveToPoint` action 定義 |
+| `control/wrench_sources/decision` | `geometry_msgs/Wrench` | Autonomy 決策，50 Hz |
+| `control/targets/depth_m` | `std_msgs/Float64` | Autonomy 決策 或 GUI |
 
-系統裡所有「想要移動載具」的來源（深度控制器、視覺伺服、GUI 手動操作），最終都只做一件事：發布一個 `geometry_msgs/Wrench`（力 `force.xyz` ＋ 力矩 `torque.xyz`，載具座標系）到自己專屬的 `control/wrench_sources/*` topic。`wrench_sum_node` 訂閱這些 topic 並相加成單一個 `control/wrench_command`，是後續唯一的下游輸入。這是整個系統最核心的設計決定：新增一種控制行為（例如避障或高層決策）只需要讓新節點發一個 Wrench topic 並在 `wrench_sum_node` 的 `input_topics` 參數加一行，不用碰任何下游程式碼；多個來源也可以同時貢獻力（例如同時做 depth hold 與 bottom camera hold），加總後自然疊加。細節與 timeout 機制見第 5 節。
+> **跨 container 通訊的前提**：兩邊的 `RMW_IMPLEMENTATION`、`ROS_DOMAIN_ID`
+> 與 DDS transport 必須一致。特別是 `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` ——
+> 少了它，Fast DDS 會宣告共享記憶體 locator，而兩個 container 的 `/dev/shm`
+> 視野不同，participant 會 match 到但資料永遠走不通，**且完全不報錯**。
+> 設定收斂在 [`.env`](../.env)。
 
 ---
 
-## 3. 感知層 Perception
+## 2. 核心設計：wrench 匯流排
 
-### 3.1 設計概念
-
-這一層要解決的問題：把感測器的原始訊號轉成控制層可以直接當回饋（feedback）使用的格式。這裡沒有真正的物件偵測或建圖，而是兩條互相獨立的訊號路徑：
-
-- **底部相機路徑**：`lk_total_transform_node` 用 LK 光流（Lucas-Kanade optical flow）在連續影像幀之間追蹤特徵點位移，換算成載具在水平面上的相對位移（x, y）與偏航角（yaw）變化——這是視覺里程計（visual odometry）的簡化版本，不需要建圖，只要能持續提供局部的位置回饋讓 PID 控制器定位（position hold）即可。
-- **STM32 感測路徑**：深度（壓力感測器）與姿態（IMU）都是韌體端量測完直接發布過來的，RPI 這邊只做型別轉接與格式轉換，不做濾波或感測器融合（sensor fusion）。
-
-`float32_to_float64_converter_node` 存在的唯一原因是型別不匹配：壓力感測器韌體送出 `Float32`，但 PID 控制器的 reference/feedback 介面統一吃 `Float64`。與其讓每個 PID 節點各自處理轉型，不如在感測邊界做一次轉換，讓下游介面維持一致。
-
-### 3.2 資料流
+系統裡所有「想要移動載具」的來源，最終都只做一件事：發布一個
+`geometry_msgs/Wrench`（力 `force.xyz` ＋ 力矩 `torque.xyz`，載具座標系）
+到自己專屬的 `control/wrench_sources/*`。
 
 ```mermaid
-graph LR
-    STM32[(STM32<br/>micro-ROS 邊界)]
-    CAM[bottom_camera_node]
-    LK[lk_total_transform_node<br/>LK 光流視覺里程計]
-    F32[float32_to_float64_converter_node]
-    IMU[imu_to_orientation_node]
-
-    CAM -->|camera/bottom/image_raw<br/>sensor_msgs/Image| LK
-    LK -->|camera/bottom/pose_px<br/>Float64MultiArray| OUT1(( ))
-    LK -->|camera/bottom/pose_px/x,y,yaw,scale<br/>Float64| OUT2(( ))
-    LK -->|state/bottom_camera/yaw_rad<br/>Float64| OUT3(( ))
-
-    STM32 -->|sensors/depth_m<br/>Float32| F32
-    F32 -->|state/depth_m<br/>Float64| OUT4(( ))
-    STM32 -->|sensors/imu<br/>sensor_msgs/Imu| IMU
-    IMU -->|state/orientation<br/>geometry_msgs/Quaternion| OUT5(( ))
-
-    OUT1 & OUT2 & OUT3 & OUT4 & OUT5 -.供下游 feedback.-> D[控制層]
+flowchart LR
+    GUI[gui_node<br/>手動操作] -->|wrench_sources/gui| BUS
+    DEPTH[output_sink_force_to_output_wrench_node<br/>深度軸] -->|wrench_sources/depth| BUS
+    DEC[/Autonomy 堆疊/] -->|wrench_sources/decision| BUS
+    BUS{{wrench_sum_node<br/>加總 + 每來源 timeout}} -->|control/wrench_command| ALLOC
+    ALLOC[wrench_to_individual_thrusters<br/>偽逆分配 + 飽和限幅] -->|thruster_0..7/force_N| OUT
+    OUT{{實機：力→PWM→STM32<br/>模擬：ros_gz_bridge}}
 ```
 
-| 節點 | 訂閱 | 發布 |
-|---|---|---|
-| `bottom_camera_node` | —（V4L2 硬體） | `camera/bottom/image_raw` (`Image`) |
-| `lk_total_transform_node` | `camera/bottom/image_raw` | `camera/bottom/pose_px` (`Float64MultiArray`)、`camera/bottom/pose_px/{x,y,yaw,scale}` (`Float64`)、`state/bottom_camera/yaw_rad` (`Float64`)、`camera/bottom/debug/tile_lines` (`Image`, 選) |
-| `float32_to_float64_converter_node` | `sensors/depth_m` (`Float32`, STM32) | `state/depth_m` (`Float64`) |
-| `imu_to_orientation_node` | `sensors/imu` (`Imu`, STM32) | `state/orientation` (`Quaternion`) |
+這是整個系統最核心的設計決定。新增一種控制行為只需要讓新節點發一個 Wrench
+topic、並在 `orca_params.yaml` 的 `input_topics` 加一行，**不用碰任何下游程式碼**；
+多個來源也可以同時貢獻力，加總後自然疊加（例如深度定深 + 自主前進）。
+
+每個來源有獨立的 `source_timeout_s`（預設 0.5 秒）：來源斷線或停止發布時，
+該來源的貢獻歸零而不是保留最後一次的殘留力，避免載具在感測器斷線後仍被舊力
+推著跑。
 
 ---
 
-## 4. 控制層：PID 控制 Control
+## 3. 感測層 `sensors`
 
-> 只有一份實作 `generic_pid_controller_node`（`LifecycleNode`），靠 remap 複用成四個實例。通用介面：`control/pid/reference`（訂）、`control/pid/feedback`（訂）、`control/pid/output`（發）、`{node}/reset`（`std_srvs/Trigger`）。
+把韌體送來的原始訊號轉成控制層可以直接當回饋使用的格式。這裡不做濾波，
+也不做感測器融合。
 
-### 4.1 設計概念
+| 節點 | 訂閱 | 發布 | 存在理由 |
+|---|---|---|---|
+| `float32_to_float64_converter_node` | `sensors/depth_m` (`Float32`) | `state/depth_m` (`Float64`) | 型別不匹配：韌體送 `Float32`，PID 介面統一吃 `Float64`。與其讓每個 PID 各自處理轉型，不如在感測邊界做一次 |
+| `imu_to_orientation_node` | `sensors/imu` (`Imu`) | `state/orientation` (`Quaternion`) | 只取姿態，丟掉角速度與加速度 |
 
-四軸控制器（深度、x、y、yaw）共用同一份 `generic_pid_controller_node`，靠 launch 檔 remap 出四個獨立實例，而不是寫四份幾乎一樣的 PID 程式碼。這代表看這張圖時，「哪個 topic 對應哪個實例」完全取決於 remap，程式碼本身看不出來——這也是為什麼下方表格要把每個實例 remap 後的實際名稱整理出來。為什麼是 `LifecycleNode` 而不是一般 `Node`，見第 6.2 節。
+這兩個節點原本放在 `depth_control` 裡，但它們與深度控制無關 —— 一個是通用型別
+轉換，一個是姿態。歸入感測層才符合它們實際的職責。
 
-yaw 軸多一個 `yaw_reference_unwrapper_node` 是因為角度在 ±π 邊界不連續（179° 到 -179° 實際只差 2°，但數值上差了 358°）：若讓 PID 直接對原始角度值做差，遇到邊界會被誤判成要繞一大圈才能到，輸出會暴衝。unwrapper 把目標角度攤平成與目前角度連續的數值，PID 才能算出正確方向的最短誤差。
+---
 
-x/y/yaw 三個 PID 各自只輸出一個純量（力或力矩），要合成一個 `Wrench` 才能送進下一階段，這是 `bottom_camera_pid_bridge_node` 存在的原因：把 world-frame 的 x/y 力與 yaw 力矩組成單一 `Wrench`，並依姿態做限幅。
+## 4. 控制層 `control` / `depth_control`
 
-### 4.2 資料流
+### 4.1 通用 PID
 
-```mermaid
-graph LR
-    subgraph DepthAxis["深度軸"]
-        DPID[depth_pid_controller_node]
-        SINK[output_sink_force_to_output_wrench_node]
-        DPID -->|control/pid/depth/sink_force_N| SINK
-        ORI[/state/orientation/] -.-> SINK
-        SINK -->|control/wrench_sources/depth<br/>Wrench| BUS(( ))
-    end
+只有一份實作 `generic_pid_controller_node`（`LifecycleNode`），靠 launch 的
+remap 複用成具名實例。通用介面：
 
-    subgraph CamAxes["底部相機三軸 (bottom_camera_pid_fbc)"]
-        YAWU[yaw_reference_unwrapper_node]
-        XPID[x_coordinate_pid_controller_node]
-        YPID[y_coordinate_pid_controller_node]
-        YAWPID[yaw_angle_pid_controller_node]
-        BRIDGE[bottom_camera_pid_bridge_node]
-        YAWU -->|.../yaw/reference_rad| YAWPID
-        XPID -->|.../x/force_world_N| BRIDGE
-        YPID -->|.../y/force_world_N| BRIDGE
-        YAWPID -->|.../yaw/torque_Nm| BRIDGE
-        BRIDGE -->|control/wrench_sources/bottom_camera<br/>Wrench| BUS
-    end
+| 介面 | 型別 |
+|---|---|
+| `control/pid/reference`（訂） | `Float64` |
+| `control/pid/feedback`（訂） | `Float64` |
+| `control/pid/output`（發） | `Float64` |
+| `{node_name}/reset`（service） | `std_srvs/Trigger` |
 
-    DM[/control/targets/depth_m/] --> DPID
-    SD[/state/depth_m/] --> DPID
-    RX[/.../x/reference_px/] --> XPID
-    FX[/.../x/feedback_px/] --> XPID
-    RY[/.../y/reference_px/] --> YPID
-    FY[/.../y/feedback_px/] --> YPID
-    TY[/control/targets/bottom_camera/yaw_rad/] --> YAWU
-    SY[/state/bottom_camera/yaw_rad/] --> YAWU & YAWPID & BRIDGE
-```
+目前只有一個實例：
 
-| Node（PID 實例） | reference（訂） | feedback（訂） | output（發） |
+| 實例 | reference | feedback | output |
 |---|---|---|---|
 | `depth_pid_controller_node` | `control/targets/depth_m` | `state/depth_m` | `control/pid/depth/sink_force_N` |
-| `x_coordinate_pid_controller_node` | `control/pid/bottom_camera/x/reference_px` | `control/pid/bottom_camera/x/feedback_px` | `control/pid/bottom_camera/x/force_world_N` |
-| `y_coordinate_pid_controller_node` | `control/pid/bottom_camera/y/reference_px` | `control/pid/bottom_camera/y/feedback_px` | `control/pid/bottom_camera/y/force_world_N` |
-| `yaw_angle_pid_controller_node` | `control/pid/bottom_camera/yaw/reference_rad` | `state/bottom_camera/yaw_rad` | `control/pid/bottom_camera/yaw/torque_Nm` |
 
-| 輔助節點 | 訂閱 | 發布 |
-|---|---|---|
-| `yaw_reference_unwrapper_node` | `control/targets/bottom_camera/yaw_rad`、`state/bottom_camera/yaw_rad` | `control/pid/bottom_camera/yaw/reference_rad` |
-| `bottom_camera_pid_bridge_node` | `.../{x,y}/force_world_N`、`.../yaw/torque_Nm`、`state/bottom_camera/yaw_rad` | `control/wrench_sources/bottom_camera` (`Wrench`) |
-| `output_sink_force_to_output_wrench_node` | `control/pid/depth/sink_force_N`、`state/orientation` | `control/wrench_sources/depth` (`Wrench`) |
+> 光流退場後，x / y / yaw 三軸的視覺伺服 PID 一併移入 `legacy/`。
+> yaw 目前是全開迴路（由 Autonomy 的 wrench 直接驅動）。若要補 yaw-hold，
+> 複用同一份 `generic_pid_controller_node` 即可，但需先決定 yaw 的權威來源
+> 是 STM32 IMU 還是飛控 IMU。
 
-Service（每個 PID 實例各一）：`{node_name}/reset` (`std_srvs/Trigger`)、`{node_name}/change_state`、`{node_name}/get_state`（lifecycle）。
+**增益每個控制迴圈重新讀取**，所以 `ros2 param set` 立即生效。這是池邊調參的
+命脈，不要為了效能改成快取。
 
----
+**積分抗飽和與輸出限幅**（`integral_limit` / `output_limit`，`<= 0` 代表停用）：
+載具觸底、卡住或浮力沒配平時誤差會恆定不為零，積分項就無上界地線性成長。
+模擬實測過：目標深度設在池底以下，45 秒內下沉力從 32 N 爬到 119 N 而且還在爬；
+此時就算把目標改淺，也要幾十秒讓積分吐完才會反應，中間會劇烈上浮超調。
+`integral_limit` 限制的是積分項的**輸出貢獻**（單位與 `output_limit` 一致，
+都是牛頓），觸限時同步把內部累加值倒算回邊界。
 
-## 5. 致動層：加總與分配 Aggregation & Allocation
+### 4.2 深度力 → wrench
 
-### 5.1 設計概念
+`output_sink_force_to_output_wrench_node` 把 PID 的純量輸出加上
+`depth_force_bias_N`（抵銷淨浮力的常數偏壓），組成 `Wrench` 發到
+`control/wrench_sources/depth`。
 
-延續第 2 節的 Wrench 匯流排設計：每個來源有獨立的 timeout（`source_timeout_s`，預設 0.5 秒）——來源斷線或停止發布時，該來源的貢獻會被歸零而不是保留最後一次的殘留力，避免載具在感測器斷線後仍被舊的力矩推著跑。
+`use_sink_force_direction` 開啟時會依 `state/orientation` 把下沉力轉到載具座標系
+（載具傾斜時仍垂直向下）；關閉時直接當作 `+z`。預設關閉。
 
-`wrench_command` 是 6 自由度（6-DOF）的合力／合力矩，但實際能操縱的是 8 顆各自只能輸出一維推力的推進器——`wrench_to_individual_thrusters_output_forces_node` 用推力分配矩陣（thrust allocation matrix，取偽逆 pseudo-inverse）解這個問題，把 6 維目標解算成 8 顆推進器各自該出多少力。推進器不接受「力」這個單位，只接受 PWM 訊號，所以還要再經過 `thruster_force_to_pwm_output_signal_node` 查表（推進器廠商提供的力-PWM 對照曲線，`thruster_lookup_table.py`）擬合出對應脈寬。
+### 4.3 為什麼用 Lifecycle Node
 
-`thruster_initialization_node` 存在的原因是 ESC（電子變速器）開機時需要先持續收到中位 PWM 訊號一段時間才會完成解鎖（arming）；如果開機直接送任意力對應的 PWM，ESC 可能無法正確初始化。這個節點鎖住 `thrusters/initializing`，讓下游暫時只輸出中位訊號，直到初始化序列跑完。
+`generic_pid_controller_node` 與 `wrench_sum_node` 繼承自 `LifecycleNode`：
 
-### 5.2 資料流
-
-```mermaid
-graph LR
-    GUI[/control/wrench_sources/gui/]
-    BC[/control/wrench_sources/bottom_camera/]
-    DEP[/control/wrench_sources/depth/]
-    DEC[/control/wrench_sources/decision<br/>保留，無發布者/]
-
-    WSUM[wrench_sum_node<br/>Lifecycle]
-    ALLOC[wrench_to_individual_thrusters_output_forces_node<br/>偽逆分配矩陣]
-    F2PWM[thruster_force_to_pwm_output_signal_node<br/>查表擬合]
-    INIT[thruster_initialization_node<br/>ESC 初始化]
-    STM32[(STM32<br/>micro-ROS)]
-
-    GUI & BC & DEP & DEC -->|Wrench| WSUM
-    WSUM -->|control/wrench_command<br/>Wrench| ALLOC
-    ALLOC -->|thrusters/thruster_0..7/force_N<br/>Float64 x8| F2PWM
-    F2PWM -->|thrusters/pwm_us<br/>Int32MultiArray| STM32
-    INIT -->|thrusters/initializing Bool| F2PWM
-    INIT -->|thrusters/set_enabled Bool| STM32
-    INIT -->|thrusters/pwm_us 中位| STM32
-    STM32 -->|thrusters/enabled Bool| SM[系統管理]
-```
-
-| Topic / Service | 型別 | 發布 | 訂閱 |
-|---|---|---|---|
-| `control/wrench_sources/{gui,bottom_camera,depth,decision}` | `Wrench` | 各控制來源 | `wrench_sum_node` |
-| `control/wrench_command` | `Wrench` | `wrench_sum_node` | `wrench_to_individual_thrusters_output_forces_node` |
-| `thrusters/thruster_{0..7}/force_N` | `Float64` | `wrench_to_individual_thrusters_output_forces_node` | `thruster_force_to_pwm_output_signal_node` |
-| `thrusters/pwm_us` | `Int32MultiArray` | `thruster_force_to_pwm_output_signal_node`、`thruster_initialization_node` | STM32 |
-| `thrusters/initializing` | `Bool` | `thruster_initialization_node` | `thruster_force_to_pwm_output_signal_node` |
-| `thrusters/set_enabled` | `Bool` | `thruster_initialization_node` | STM32 |
-| `thrusters/enabled` | `Bool` | STM32 | `supervisor_node`（安全） |
-| `thrusters/{name}/initialize`、`thrusters/initialize_all` | `std_srvs/Trigger` | service：`thruster_initialization_node` | — |
-
-`wrench_sum_node` lifecycle service：`change_state`、`get_state`（由 supervisor 控制啟停；每來源 `source_timeout_s` 逾時歸零）。
-
----
-
-## 6. 系統管理 System Management
-
-### 6.1 設計概念
-
-`supervisor_node` 是整個系統唯一決定「現在該讓哪些控制器運作」的地方，它把安全前提（kill switch、感測器是否逾時、推進器是否已啟用）跟控制器本身的邏輯完全切開：PID 控制器完全不知道 kill switch 存在，它只回應標準的 ROS 2 Lifecycle 狀態轉換（`configure`／`activate`／`deactivate`）；supervisor 才是那個決定「現在允許哪些節點進入 active」的角色。好處是新增一種安全條件只需要改 supervisor 一處，不用逐一修改每個控制器。
-
-`gui_node` 本質上是一個 ROS 2 ↔ WebSocket 的通用橋接器，把瀏覽器操作轉呼叫 supervisor 的 service、發布手動 Wrench、訂閱狀態 topic 轉發顯示，讓操作者不需要另外裝 ROS 2 環境就能監控與操作載具。
-
-`MoveToPoint` action 的設計是開迴路（open-loop）軌跡產生器：`waypoint_target_publisher` 收到目標點後不管載具實際有沒有到，只是以固定速度把目標內插成一連串逐漸逼近的 setpoint 發布出去；真正「有沒有追上」是下游的 x/y PID controller 用相機回饋去追這個逐漸移動的 setpoint 完成的。換句話說，閉迴路（closed loop）發生在 PID 那一層，action server 只負責產生平滑的參考軌跡——這也是為什麼 `dive_then_forward_mission_node` 這種任務節點完全不用碰 `Wrench` 或 PID 增益，只需要呼叫 supervisor 的 service 與 `MoveToPoint` action。
-
-### 6.2 為什麼用 Lifecycle Node
-
-如果只熟悉一般的 rclpy `Node`，這是本專案裡最值得花時間理解的部分。`generic_pid_controller_node`（PID 控制器）和 `wrench_sum_node`（加總器）都繼承自 `rclpy.lifecycle.LifecycleNode`，而不是一般的 `Node`。Lifecycle Node 是 ROS 2 內建的受管理節點模型，有標準狀態機：
-
-```
+```text
 unconfigured → (configure) → inactive → (activate) → active
                                   ↑___________(deactivate)___|
 ```
 
-節點在 `inactive` 狀態時仍然存在、可以被查詢，但不做實際工作（PID 控制器不累積積分項、不輸出；`wrench_sum_node` 不加總、不發布）；只有進入 `active` 才開始運作。相較於在一般 Node 裡用自訂旗標（例如 `self._enabled`）判斷要不要輸出，Lifecycle Node 的好處是狀態轉換是標準化的 service 介面（`~/change_state`、`~/get_state`），外部工具（`ros2 lifecycle`、以及本專案的 `supervisor_node`）可以用同一套邏輯管理任何 lifecycle 節點，不用替每個節點寫特製的啟停邏輯。
+節點在 `inactive` 時仍然存在、可以被查詢，但不做實際工作（PID 不累積積分項、
+不輸出）。相較於在一般 Node 裡用自訂旗標，Lifecycle 的好處是狀態轉換是標準化的
+service 介面，外部工具（`ros2 lifecycle`、本專案的 `supervisor_node`）可以用
+同一套邏輯管理任何 lifecycle 節點，不用替每個節點寫特製啟停邏輯。
 
-### 6.3 `supervisor_node`：中央狀態機
+---
 
-`system_manager/supervisor_node` 維護一個獨立於任何 lifecycle 狀態機之外的高層模式：
+## 5. 致動層 `wrench_sum` / `thrusters`
+
+### 5.1 加總
+
+`wrench_sum_node`（Lifecycle）訂閱 `input_topics` 列出的所有來源，相加成單一
+`control/wrench_command`。設定在 `orca_params.yaml`，**開機時讀取**（節點在建構時
+就要建立訂閱），改了要重啟。
+
+### 5.2 分配與飽和
+
+`wrench_to_individual_thrusters_output_forces_node` 用推力分配矩陣（偽逆）
+把 6 維目標解算成 8 顆推進器各自的出力。幾何來自 `hardware.yaml`
+（`thruster_positions_m` / `thruster_directions`，每顆 3 個值展平成一維陣列，
+因為 ROS 2 參數不支援巢狀陣列）。
+
+**飽和限幅也在這裡**，而不是只在力→PWM 節點裡。原因：模擬路徑刻意跳過 PWM
+轉換節點，限幅若只寫在那裡，模擬就完全沒有飽和行為，調出來的增益搬到實機會
+對不上。放在兩條路徑的共同節點上，模擬與實機才有同一組飽和行為。
+
+`saturation_mode`：
+
+- `scale`（預設）—— 任一顆超限時全部等比例縮放。**保留指令方向**，載具只是變慢。
+- `clip` —— 各自獨立截斷。會扭曲合力方向，載具往非預期方向偏。
+
+### 5.3 力 → PWM（僅實機）
+
+`thruster_force_to_pwm_output_signal_node` 查推進器廠商的力-PWM 對照曲線
+（`thruster_lookup_table_16V.csv`）擬合出脈寬，發到 `thrusters/pwm_us`。
+自己也有一道 clamp，作為最後防線。
+
+`thruster_initialization_node` 存在的原因：ESC 開機時需要先持續收到中位 PWM
+一段時間才會完成解鎖（arming）。它鎖住 `thrusters/initializing`，讓下游暫時
+只輸出中位訊號，直到初始化序列跑完。
+
+| Topic / Service | 型別 | 發布 | 訂閱 |
+|---|---|---|---|
+| `control/wrench_sources/{gui,depth,decision}` | `Wrench` | 各控制來源 | `wrench_sum_node` |
+| `control/wrench_command` | `Wrench` | `wrench_sum_node` | 分配節點 |
+| `thrusters/thruster_{0..7}/force_N` | `Float64` | 分配節點 | 力→PWM 節點 / `ros_gz_bridge` |
+| `thrusters/pwm_us` | `Int32MultiArray` | 力→PWM 節點、初始化節點 | STM32 |
+| `thrusters/initializing` | `Bool` | 初始化節點 | 力→PWM 節點 |
+| `thrusters/set_enabled` | `Bool` | 初始化節點 | STM32 |
+| `thrusters/enabled` | `Bool` | STM32 | `supervisor_node` |
+| `thrusters/initialize_all` | `std_srvs/Trigger` | service：初始化節點 | — |
+
+---
+
+## 6. 系統管理 `system_manager`
+
+`supervisor_node` 是整個系統唯一決定「現在該讓哪些控制器運作」的地方。它把
+安全前提跟控制器邏輯完全切開：PID 控制器完全不知道 kill switch 存在，只回應
+標準的 lifecycle 轉換；supervisor 才是決定「現在允許哪些節點進入 active」的角色。
+好處是新增一種安全條件只需要改 supervisor 一處。
+
+### 6.1 控制模式
 
 ```python
 class ControlMode(Enum):
     SAFE_DISABLED
     MANUAL
     DEPTH_HOLD
-    BOTTOM_CAMERA_HOLD
-    DEPTH_AND_BOTTOM_CAMERA_HOLD
+    AUTONOMOUS
+    AUTONOMOUS_AND_DEPTH_HOLD
     FAULT
 ```
 
-它把 controller 分成「群組」（`controller_groups.py` 裡的 `ControllerGroupManager`）：
+`AUTONOMOUS` 放行的是 Autonomy 堆疊直接發到 wrench 匯流排的
+`control/wrench_sources/decision`。它沒有自己的 lifecycle 節點 —— 只需要
+`wrench_sum_node` 是 active，外加「決策來源還活著」這個安全前提。
+`AUTONOMOUS` 與 `DEPTH_HOLD` 可以疊加。
 
-| 群組名稱 | 成員 node |
-|---|---|
-| `depth_control` | `depth_pid_controller_node` |
-| `bottom_camera_pid_fbc` | `x_coordinate_pid_controller_node`、`y_coordinate_pid_controller_node`、`yaw_angle_pid_controller_node` |
-| `wrench_sum`（內部群組，只要任一上述群組 active 就跟著 active） | `wrench_sum_node` |
+> 在有這個模式之前，要讓決策層的指令到得了推進器，只能先進 `MANUAL`
+> （語意矛盾，而且會關掉深度 PID）或 `DEPTH_HOLD`（順帶啟用深度 PID），
+> 而且沒有任何機制確認決策來源還活著 —— Autonomy 掛掉時，`wrench_sum` 只會
+> 靜默把該來源歸零，載具停住但沒有人知道為什麼。
 
-當外部（GUI 或 mission node）呼叫 `system_manager/set_mode/depth_hold` 這類 service 時，`supervisor_node`（`supervisor_node.py`）會：
+### 6.2 安全檢查
 
-1. 呼叫 `SafetyMonitor` 檢查安全前提（kill switch 沒有觸發、推進器已啟用、對應的感測器資料沒有逾時，逾時門檻 `depth_sensor_timeout_s` / `bottom_camera_timeout_s` 各自可調，預設 1 秒）。
-2. 若通過，對該群組的每個 node 呼叫 `.../reset` service（歸零 PID 積分項等內部狀態），再把它們 lifecycle enable（`configure` → `activate`）。
-3. 同步確保 `wrench_sum_node` 進入 `active`（只要有任何一個 controller 群組是 active，就需要它運作）。
-4. 用一個 0.2 秒週期的 timer 持續重新檢查目前 active 群組的安全條件（`_check_active_mode_safety`）；一旦某個安全前提被打破（例如深度感測器資料變 stale、kill switch 觸發、推進器被停用），立刻把所有 controller 群組 lifecycle disable 並進入 `FAULT` 模式，不需要外部再呼叫任何 service。另一個同週期 timer 負責把目前模式／狀態文字廣播到 `system_manager/mode`、`system_manager/status`。
+`SafetyMonitor` 檢查的前提：
 
-這個設計把「安全門檻」與「controller 邏輯本身」完全解耦：PID 節點完全不知道 kill switch 或感測器逾時這些事，它只回應 lifecycle transition；「什麼時候允許 active」這個決策全部集中在 `supervisor_node` 一個地方。
+| 前提 | 參數 | 適用模式 |
+|---|---|---|
+| kill switch 未觸發 | `require_not_killed` | 全部 |
+| 推進器已啟用 | `require_thrusters_enabled` | 全部 |
+| 深度資料未逾時 | `depth_sensor_timeout_s` | `DEPTH_HOLD` |
+| decision wrench 未逾時 | `decision_timeout_s` | `AUTONOMOUS` |
 
-### 6.4 案例研究：`dive_then_forward_mission_node`
+一個 0.2 秒週期的 timer 持續重新檢查目前 active 模式的安全條件。任一前提被打破
+就立刻把所有 controller lifecycle disable、停掉 `wrench_sum`、進入 `FAULT`，
+不需要外部再呼叫任何 service。另一個同週期 timer 把模式／狀態文字廣播到
+`system_manager/mode` 與 `system_manager/status`。
 
-這個節點示範了以上所有積木怎麼被組合成一個「無人自主任務」，是理解整個架構如何被使用的最佳範例。它是一個**顯式有限狀態機**（`MissionState`，用 `Enum` 定義約 19 個狀態，而不是 behavior tree 或其他框架），流程大致是：
+### 6.3 介面
 
-1. `CALL_RESET_BOTTOM_CAMERA_POSE` / `CALL_RESET_MOVE_TO_POINT`：呼叫對應的 reset service，確保從乾淨狀態開始。
-2. `CALL_DEPTH_HOLD`：呼叫 `system_manager/set_mode/depth_hold`，並發布目標深度到 `control/targets/depth_m`。
-3. `WAIT_REACH_DEPTH`：訂閱 `state/depth_m`，等深度誤差在容忍範圍內並穩定一段時間。
-4. `CALL_BOTTOM_CAMERA_HOLD` → `SEND_MOVE_GOAL`：呼叫 `system_manager/set_mode/bottom_camera_hold`，接著送一個 `MoveToPoint` action goal（往 +X 方向前進固定像素距離）。
-5. `MOVING` → `WAIT_FORWARD_HOLD_STABLE`：等 action 完成，並確認位置穩定。
-6. `PREPARE_TURN` → `WAIT_REACH_TURN_YAW`：分階段（staged）調整 yaw 目標，轉向。
-7. `CALL_DISABLE_DEPTH_HOLD` → `DONE`。
+| Interface | 型別 | 說明 |
+|---|---|---|
+| `system_manager/mode` | `String`（發布） | 目前 `ControlMode`，0.2 s 廣播 |
+| `system_manager/status` | `String`（發布） | 人類可讀狀態／FAULT 原因 |
+| `system_manager/set_mode/{safe_disabled,manual,depth_hold,autonomous}` | `Trigger` | 切模式 |
+| `system_manager/disable/{depth_hold,autonomous}` | `Trigger` | 停用單一群組 |
+| `system_manager/reset_controllers` | `Trigger` | 廣播 reset（歸零積分項等） |
+| `sensors/killed` | `Bool`（訂閱） | kill switch，來自 STM32 |
+| `/flash_stm32` | `Trigger` | 韌體燒錄（`stm32_manager` 提供，開機可自動） |
 
-任何一步逾時或失敗都會轉到 `FAILED` 狀態。這個節點完全不直接碰 `Wrench`、PID 增益或任何底層細節——它只是 `supervisor_node` 的 service client 加上 `MoveToPoint` 的 action client，證明了 6.1/6.3 節「把安全/模式邏輯集中在 supervisor，其餘節點只管呼叫標準介面」的設計確實達到了任務邏輯與控制邏輯解耦的效果。
+---
 
-### 6.5 資料流與介面表
+## 7. 操作介面 `gui`
 
-```mermaid
-graph TD
-    STM32[(STM32<br/>感測 / 推進器邊界)]
-    SUP[supervisor_node<br/>ControlMode 狀態機 + SafetyMonitor]
-    GUINODE[gui_node<br/>ROS2 ↔ WebSocket 橋接]
-    MISSION[dive_then_forward_mission_node<br/>任務狀態機]
-    WPT[waypoint_target_publisher<br/>MoveToPoint action server]
+`gui_node` 是 ROS 2 ↔ WebSocket 的橋接器，讓操作者不需要另外裝 ROS 2 環境就能
+監控與操作載具。
 
-    STM32 -.安全訊號 + 感測逾時偵測.-> SUP
+- 發布 `control/wrench_sources/gui`（手動 wrench）、`control/targets/depth_m`
+- 訂閱 `system_manager/mode`、`/status`、`state/depth_m`、`thrusters/*` 轉發前端
+- 透過 `rcl_interfaces` Get/SetParameters 即時調深度 PID 增益（池邊調參）
+- 呼叫 supervisor 的模式切換 service、推進器初始化、STM32 燒錄
 
-    GUINODE -.set_mode/*, disable/*,<br/>reset_controllers (Trigger).-> SUP
-    MISSION -.set_mode/*, targets 設定.-> SUP
-    MISSION -.MoveToPoint action.-> WPT
-    GUINODE -.MoveToPoint action.-> WPT
-    WPT -->|control/pid/bottom_camera/x,y/reference_px| PID[PID 控制層]
+影像串流由獨立的 `web_video_server` 提供 MJPEG，不走 WebSocket。底部相機退場後，
+串流來源預設指向 Autonomy 堆疊的 RealSense。
 
-    SUP -.lifecycle 啟停.-> GRP[depth / bottom_camera PID 群組 + wrench_sum]
-    SUP -->|mode / status| GUINODE
-    SUP -.開機自動燒錄.-> STM32
+---
+
+## 8. 啟動與設定 `orca_bringup`
+
+所有 launch 與設定的唯一來源。
+
+```text
+orca_bringup/
+├── launch/
+│   ├── bringup.launch.py    # 唯一入口，sim:=true 切模擬
+│   └── record.launch.py     # bag 錄製
+└── config/
+    ├── orca_params.yaml     # 控制參數（池邊調參動這份）
+    ├── hardware.yaml        # 推進器幾何、出力上限、ESC 時序
+    ├── sim_overrides.yaml   # 模擬疊加值
+    └── record_topics.yaml   # bag 錄製清單
 ```
 
-| Interface | 型別 | 提供 / 發布 | 說明 |
-|---|---|---|---|
-| `system_manager/mode` | `String`（發布） | `supervisor_node` | 目前 `ControlMode`，0.2 s 廣播 |
-| `system_manager/status` | `String`（發布） | `supervisor_node` | 人類可讀狀態 |
-| `system_manager/set_mode/{safe_disabled,manual,depth_hold,bottom_camera_hold}` | `Trigger`（service） | `supervisor_node` | 切模式 / 啟用群組 |
-| `system_manager/disable/{depth_hold,bottom_camera_hold}` | `Trigger`（service） | `supervisor_node` | 停用群組 |
-| `system_manager/reset_controllers` | `Trigger`（service） | `supervisor_node` | 廣播 reset |
-| `sensors/killed` | `Bool`（訂閱） | STM32 | kill switch |
-| `{node}/change_state`、`{node}/get_state` | `lifecycle_msgs`（client） | `supervisor_node` | 對各 lifecycle node |
-| `/flash_stm32` | `Trigger`（service） | `stm32_flasher_node` | 韌體燒錄（開機可自動，見第 8 節） |
+實機與模擬**共用同一個 launch 檔**，差異只有兩處：`sim=true` 時跳過硬體專屬
+節點（micro-ROS agent、STM32 燒錄、ESC 初始化、力→PWM），並額外疊上
+`sim_overrides.yaml`。這是刻意的 —— 舊架構是實機／模擬各一份 launch 檔，
+兩邊已經開始各自漂移（`wrench_sum` 的來源清單就已經不一致）。
 
-**GUI（`gui_node`）額外角色**：發布 `control/wrench_sources/gui`（手動 wrench）；訂閱 `system_manager/mode`、`/status`、`camera/bottom/pose_px`、`state/depth_m` 轉發前端；透過 `rcl_interfaces` Get/SetParameters 即時調 PID 增益；`MoveToPoint` action client。影像串流由獨立 `web_video_server` 提供 MJPEG，不走 WebSocket。
+### 參數的 namespace 陷阱
 
----
+params YAML 的 key 必須是**含 namespace 的完整節點名**。本專案的 namespace 是
+launch 參數，所以一律用萬用字元：
 
-## 7. 訊息介面定義：`xy_translation_control_interfaces`
-
-感知/控制層與任務層之間唯一的自訂訊息定義，無 node，只有 `MoveToPoint.action`：
-
-```
-# Goal
-float64 x_px
-float64 y_px
-float64 speed_px_s
----
-# Result
-bool success
-string message
----
-# Feedback
-float64 target_x_px
-float64 target_y_px
-float64 progress
-float64 remaining_distance_px
+```yaml
+/**/depth_pid_controller_node:
+  ros__parameters:
+    proportional_gain: 40.0
 ```
 
-Action 名稱：`control/targets/move_to_point`。server 為 `waypoint_target_publisher`；client 有兩個：`gui_node`（操作者手動點目標）與 `dive_then_forward_mission_node`（見 6.4 節）。設計動機見 6.1 節「開迴路軌跡產生器」。
+寫錯的話參數**不會報錯**，只會靜默回落到節點內建預設值（PID 增益直接變 0）。
+改完務必用 `make dump_params` 確認實際生效的值。
+
+### 兩類參數
+
+| 類別 | 行為 | 例子 |
+|---|---|---|
+| 熱調 | 每個控制迴圈重新讀取，`ros2 param set` 立即生效 | PID 四個增益、`integral_limit`、`output_limit`、`depth_force_bias_N` |
+| 開機讀 | 建構時讀一次，改了要重啟 | `controller_loop_timer_period_s`、`wrench_sum` 的 `input_topics` / `publish_rate` / `source_timeout_s`、推進器幾何 |
 
 ---
 
-## 8. 感測器／推進器韌體介面邊界：SAUVC-STM32
+## 9. 外部邊界
 
-獨立 submodule（`SAUVC-STM32`，STM32F4），透過 `micro_ros_agent`（serial transport）與本 repo 的 ROS 2 graph 串接，是唯一的橋樑。本文只列邊界介面，不深入韌體實作（`MS5837.c` 壓力感測器驅動、`kill_switch_*`、`thruster_pwm_*` 等）。
+### 9.1 STM32 韌體（`SAUVC-STM32` submodule）
 
-**韌體 → RPI（graph 裡完全沒有節點發布，資料源頭是韌體）**：
+透過 `micro_ros_agent`（serial transport）接進同一個 ROS 2 graph。序列埠路徑
+來自 `.env` 的 `ORCA_STM32_PORT`，**建議用 `/dev/serial/by-id/` 穩定路徑** ——
+`/dev/ttyUSB*` 的編號會隨插拔順序改變。
 
-- `sensors/depth_m`（`std_msgs/Float32`）
-- `sensors/imu`（`sensor_msgs/Imu`）
-- `sensors/killed`（`std_msgs/Bool`）
-- `thrusters/enabled`（`std_msgs/Bool`）
+**韌體 → 本 repo**：`sensors/depth_m` (`Float32`)、`sensors/imu` (`Imu`)、
+`sensors/killed` (`Bool`)、`thrusters/enabled` (`Bool`)
 
-**RPI → 韌體（ROS 2 graph 發布，預期被韌體訂閱）**：
+**本 repo → 韌體**：`thrusters/pwm_us` (`Int32MultiArray`)、
+`thrusters/set_enabled` (`Bool`)
 
-- `thrusters/pwm_us`（`std_msgs/Int32MultiArray`，8 顆推進器 PWM）
-- `thrusters/set_enabled`（`std_msgs/Bool`）
+### 9.2 模擬（`SAUVC-Simulation` submodule）
 
-`/flash_stm32`（`std_srvs/Trigger`，`stm32_manager` 提供）是燒錄用的控制介面，不是即時資料流；`supervisor_node` 開機時依 `auto_flash_stm32_on_startup` 參數決定要不要自動呼叫。韌體 repo 裡還有 `electromagnet_controller.c` 等模組，但目前沒有對應的 ROS 2 topic 接進本 repo，屬於韌體端尚未串接的功能，不在本文討論範圍。
+Gazebo Fortress + `ros_gz_bridge`。模擬時分配層只到「每顆推進器的力」為止，
+`thrusters/thruster_{0..7}/force_N` 直接進 bridge。深度來自 Gazebo altimeter
+經 `altimeter_to_pressure_sensor_node` 轉成 `sensors/depth_m`。
+
+> **模擬的深度零點是載具出生位置，不是水面**（Gazebo altimeter 的
+> `vertical_position` 是相對出生點的）。實機壓力計的零點是水面。
+> 模擬調出來的 `depth_force_bias_N` 與絕對深度目標不能直接搬到實機。
 
 ---
 
-## 9. 模擬環境：SAUVC-Simulation
+## 10. 已知問題
 
-獨立 submodule，提供 Gazebo 場景。本 repo 透過 `rpi_ros2_ws/src/launch/simulation_control.launch.py` 這個獨立 launch 檔切換到模擬模式，與正常的 `orca_bringup.launch.py` 差異在於：
+以下是已確認、但不在本 repo 修的跨 repo 落差，記錄備查（完整分析見
+[SIMULATION_FINDINGS.md](../../docs/SIMULATION_FINDINGS.md)）：
 
-- **拿掉硬體專屬節點**：不啟動 `bottom_camera_node`（相機驅動）、`micro_ros_agent`、`stm32_flasher_node`、`thruster_force_to_pwm_output_signal_node`／`thruster_initialization_node`——這些硬體 I/O 交給 `SAUVC-Simulation` repo 裡的 `ros_gz_bridge` 對接 Gazebo。`lk_total_transform_node` 改吃模擬相機的 `image_topic` 參數。分配層只到 `wrench_to_individual_thrusters_output_forces_node`（輸出每顆推進器的力），不再轉 PWM。
-- **放寬安全門檻**：`supervisor_node` 的 `require_not_killed`、`require_thrusters_enabled`、`auto_flash_stm32_on_startup` 都設為 `False`，因為模擬環境沒有實體 kill switch 與 ESC 需要等待初始化。
-
-其餘節點（`xy_control`、`depth_control`、`wrench_sum`、`gui`）與實機共用同一份程式碼，只換 launch 參數，不用重新編譯。
-
+1. **單位落差。** Autonomy 的 `decision_params.yaml` 與程式碼預設差 100 倍
+   （`move_above_max_surge` YAML 15.0 vs 程式碼 0.15），這些值乘上 `k_surge`
+   後**直接當牛頓**進本 repo 的分配矩陣。實際後果：`BumpFlare` 約 20 N（合理），
+   `GoToPose` 約 0.24 N（等於不動）。
+2. **`heave` 無增益。** Autonomy 的 `wrench_adapter.cpp` 中 `force.z = heave`
+   是唯一沒乘係數的軸。目前所有 BT 節點都未設定 heave 故恆為 0；一旦有人設定，
+   它會直接對抗深度 PID，且兩者在 wrench 匯流排上靜默相加。
+3. **機械臂通道斷開。** Autonomy 發布 `/orca/decision/arm` (`Int32`) 與
+   `/orca/decision/hand` (`Bool`)，本 repo 沒有任何訂閱者，用的是完全不同的
+   `actuators/electromagnet/enabled`。
+4. **無回饋回 Autonomy。** Autonomy 設定 desired_depth 但從不知道實際深度。
+5. **兩個獨立的 IMU 來源。** Autonomy 訂閱飛控 IMU（`/orca/imu/data`），
+   本 repo 用 STM32 IMU（`sensors/imu`）。同一台載具上兩個 IMU 各餵各的消費者，
+   彼此不知道對方存在。要補 yaw-hold 之前必須先決定權威來源。
+6. **namespace 硬編碼。** Autonomy 的 `decision.launch.py` 寫死
+   `/orca_auv/...`；本 repo 的 namespace 是參數。改動後 Autonomy 會**靜默失效**
+   （`wrench_sum` 的 timeout 把該來源歸零，載具只是不動，沒有錯誤訊息）。
+7. **`wrench_sum` 的 `publish_rate` 名不副實。** `listener_callback` 收到任何
+   來源就直接發布一次，同時 timer 也在發，實際輸出率是「timer 頻率 ＋ 所有輸入
+   頻率總和」。設 30 Hz 實測約 130 Hz。

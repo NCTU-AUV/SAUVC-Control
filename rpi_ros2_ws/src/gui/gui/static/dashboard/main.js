@@ -186,10 +186,6 @@ websocket.onopen = (event) => {
     console.log("websocket.onopen");
 };
 
-function send_process_action(target, action) {
-    websocket.send(JSON.stringify(protocol.makeProcessMessage(target, action)));
-}
-
 function send_controller_action(group, action) {
     websocket.send(JSON.stringify(protocol.makeControllerMessage(group, action)));
 }
@@ -227,6 +223,18 @@ function set_supervisor_manual_mode(enabled) {
         protocol.actions.setSupervisorManualMode,
         {enabled: enabled}
     )));
+}
+
+function set_supervisor_autonomous_mode(enabled) {
+    websocket.send(JSON.stringify(protocol.makeActionMessage(
+        protocol.actions.setSupervisorAutonomousMode,
+        {enabled: Boolean(enabled)}
+    )));
+}
+
+function supervisor_autonomous_mode_input_onchange() {
+    const checkbox = document.getElementById("supervisor_autonomous_mode_input");
+    set_supervisor_autonomous_mode(Boolean(checkbox && checkbox.checked));
 }
 
 function supervisor_manual_mode_input_onchange() {
