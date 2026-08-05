@@ -364,9 +364,9 @@ Gazebo Fortress + `ros_gz_bridge`。模擬時分配層只到「每顆推進器�
 5. **兩個獨立的 IMU 來源。** Autonomy 訂閱飛控 IMU（`/orca/imu/data`），
    本 repo 用 STM32 IMU（`sensors/imu`）。同一台載具上兩個 IMU 各餵各的消費者，
    彼此不知道對方存在。要補 yaw-hold 之前必須先決定權威來源。
-6. **namespace 硬編碼。** Autonomy 的 `decision.launch.py` 寫死
-   `/orca_auv/...`；本 repo 的 namespace 是參數。改動後 Autonomy 會**靜默失效**
-   （`wrench_sum` 的 timeout 把該來源歸零，載具只是不動，沒有錯誤訊息）。
+6. ~~**namespace 硬編碼。**~~ 已修：Autonomy 的 `decision.launch.py` 改由
+   `namespace` 參數推導 remap，`perception.launch.py` 展開 YAML 裡的 `$(ns)`，
+   兩者的預設值都讀 `ORCA_NAMESPACE`。兩個 repo 現在都是參數化的。
 7. **`wrench_sum` 的 `publish_rate` 名不副實。** `listener_callback` 收到任何
    來源就直接發布一次，同時 timer 也在發，實際輸出率是「timer 頻率 ＋ 所有輸入
    頻率總和」。設 30 Hz 實測約 130 Hz。
