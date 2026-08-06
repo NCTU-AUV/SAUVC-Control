@@ -1,3 +1,5 @@
+// Websocket protocol contract. Keep in step with backend/protocol.py —
+// the two files are the same contract written twice, once per language.
 const GuiProtocol = Object.freeze({
     websocketPath: "/websocket",
     websocketSubprotocol: "protocolOne",
@@ -22,6 +24,9 @@ const GuiProtocol = Object.freeze({
         setSupervisorSimulationMode: "set_supervisor_simulation_mode",
         setSupervisorManualMode: "set_supervisor_manual_mode",
         setSupervisorAutonomousMode: "set_supervisor_autonomous_mode",
+        setSupervisorDepthHold: "set_supervisor_depth_hold",
+        safeDisable: "safe_disable",
+        startMission: "start_mission",
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",
@@ -45,6 +50,19 @@ const GuiProtocol = Object.freeze({
         targetDepthM: "control/targets/depth_m",
         depthPidParams: "control/pid/depth/gui_params",
         flashStm32Status: "flash_stm32_status",
+        // GUI-only channels — not real ROS topics.
+        serviceResult: "gui/service_result",
+        bagStatus: "gui/bag_status",
+        cameraSources: "gui/camera_sources",
+    }),
+    // Vehicle modes as reported by system_manager/mode.
+    modes: Object.freeze({
+        safeDisabled: "SAFE_DISABLED",
+        manual: "MANUAL",
+        depthHold: "DEPTH_HOLD",
+        autonomous: "AUTONOMOUS",
+        autonomousAndDepthHold: "AUTONOMOUS_AND_DEPTH_HOLD",
+        fault: "FAULT",
     }),
     makeWebsocketUrl(hostname) {
         return "ws://" + hostname + this.websocketPath;
@@ -78,3 +96,7 @@ const GuiProtocol = Object.freeze({
         };
     },
 });
+
+if (typeof window !== "undefined") {
+    window.GuiProtocol = GuiProtocol;
+}

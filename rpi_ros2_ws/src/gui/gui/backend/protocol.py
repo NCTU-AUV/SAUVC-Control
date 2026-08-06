@@ -1,4 +1,8 @@
-"""Shared websocket protocol constants for the GUI package."""
+"""Shared websocket protocol constants for the GUI package.
+
+Keep this in step with static/shared/protocol.js — the two files are the same
+contract written twice, once per language.
+"""
 
 WEBSOCKET_PATH = "/websocket"
 WEBSOCKET_SUBPROTOCOL = "protocolOne"
@@ -22,6 +26,13 @@ ACTION_FLASH_STM32 = "flash_stm32"
 ACTION_SET_SUPERVISOR_SIMULATION_MODE = "set_supervisor_simulation_mode"
 ACTION_SET_SUPERVISOR_MANUAL_MODE = "set_supervisor_manual_mode"
 ACTION_SET_SUPERVISOR_AUTONOMOUS_MODE = "set_supervisor_autonomous_mode"
+# depth hold used to be reachable only through the controller-group message,
+# which made it the one mode the GUI could not present alongside the others.
+ACTION_SET_SUPERVISOR_DEPTH_HOLD = "set_supervisor_depth_hold"
+ACTION_SAFE_DISABLE = "safe_disable"
+# Mission start lives in the autonomy stack. The two containers share one ROS
+# graph, so publishing it from here works and saves the operator a shell.
+ACTION_START_MISSION = "start_mission"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
 
@@ -38,6 +49,7 @@ SUPERVISOR_SERVICE_RESET_CONTROLLERS = "reset_controllers"
 SUPERVISOR_SERVICE_SAFE_DISABLED = "safe_disabled"
 SUPERVISOR_SERVICE_MANUAL = "manual"
 
+# --- vehicle topics relayed to the browser ---------------------------------
 TOPIC_KILLED = "sensors/killed"
 TOPIC_DEPTH_M = "sensors/depth_m"
 TOPIC_STM32_LOG = "diagnostics/stm32/log"
@@ -50,6 +62,27 @@ TOPIC_WRENCH_COMMAND = "control/wrench_command"
 TOPIC_TARGET_DEPTH_M = "control/targets/depth_m"
 TOPIC_DEPTH_PID_PARAMS = "control/pid/depth/gui_params"
 TOPIC_FLASH_STM32_STATUS = "flash_stm32_status"
+
+# --- GUI-only channels (never real ROS topics) -----------------------------
+# Prefixed so nobody goes looking for them with `ros2 topic echo`.
+#
+# Service results used to go only to the node logger, so a rejected request —
+# arming while latched in FAULT, for one — produced no visible effect at all:
+# the checkbox stayed ticked and the operator had no way to know why nothing
+# happened. Every supervisor call now reports back here.
+TOPIC_SERVICE_RESULT = "gui/service_result"
+# Bag recording has no status topic of its own (record.launch.py wraps
+# `ros2 bag record` in an ExecuteProcess), so the node derives this from the
+# graph plus the bag directory on disk.
+TOPIC_BAG_STATUS = "gui/bag_status"
+# Camera stream descriptors. The topics differ between the real robot and the
+# simulator, so the browser must not hardcode them — it receives the list on
+# connect and only builds web_video_server URLs from it.
+TOPIC_CAMERA_SOURCES = "gui/camera_sources"
+# NOTE: mission *state* is deliberately absent. /orca/decision/status carries
+# orca_interface/msg/DecisionStatus, and orca_interface is a SAUVC-JETSON
+# package that is not built into the control container — this node cannot
+# deserialise it. Starting a mission works because that topic is std_msgs/Bool.
 
 
 def topic_payload(topic_name, msg):

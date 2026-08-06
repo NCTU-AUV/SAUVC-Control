@@ -51,6 +51,12 @@ class AIOHTTPServer:
         for payload in pending_payloads:
             await websocket_response.send_str(payload)
 
+        if self._on_connect is not None:
+            try:
+                self._on_connect()
+            except Exception as exc:                      # noqa: BLE001
+                print(f"on_connect hook failed: {exc}")
+
         async for msg in websocket_response:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 if msg.data == 'close':
@@ -73,8 +79,13 @@ class AIOHTTPServer:
         response.headers['Cache-Control'] = 'no-store'
         return response
 
-    def __init__(self, msg_callback):
+    def __init__(self, msg_callback, on_connect=None):
         self._msg_callback = msg_callback
+        # Called once per websocket connection so the node can re-send state
+        # that is not periodic (camera sources, the current mode). The pending
+        # buffer below only covers the *first* client — it is drained on flush,
+        # so a reload or a second browser would otherwise start blank.
+        self._on_connect = on_connect
 
         app = web.Application(middlewares=[AIOHTTPServer.no_cache_middleware])
 
