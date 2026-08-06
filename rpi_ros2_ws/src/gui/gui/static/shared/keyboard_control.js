@@ -1,14 +1,19 @@
-// Keyboard piloting: WASD translates, Q/E steps the depth setpoint.
+// Keyboard piloting: WASD/arrows translate and yaw, Q/E controls depth.
 //
-// Two mechanisms on purpose, because they are genuinely different things:
+// Q/E has to do two different things depending on the mode, because the two
+// vertical mechanisms are not both available at once:
 //
-//   WASD publishes an open-loop wrench onto control/wrench_sources/gui, which
-//   the supervisor only lets through in MANUAL. Held keys are composed every
-//   tick, so W+D is a diagonal rather than whichever key won a race.
+//   MANUAL      the depth PID is deactivated — _set_mode(MANUAL) clears every
+//               controller group — so a depth *setpoint* has nobody to act on
+//               it. Q/E therefore joins the wrench as open-loop vertical force,
+//               exactly like WASD.
+//   DEPTH_HOLD  the PID is running and holding a setpoint, so Q/E steps
+//               control/targets/depth_m and lets the loop fly the vehicle
+//               there. Pushing raw force would just fight the PID.
 //
-//   Q/E moves control/targets/depth_m and lets the depth PID hold it. Stepping
-//   a setpoint is a discrete event, so those fire on keydown and repeat on a
-//   slower timer than the wrench.
+// WASD/arrows always publish a wrench onto control/wrench_sources/gui, which
+// the supervisor only lets through in MANUAL. Held keys are composed every
+// tick, so W+D is a diagonal rather than whichever key won a race.
 
 const WRENCH_HZ = 20;
 const DEPTH_REPEAT_MS = 250;
@@ -22,9 +27,18 @@ const AXES = Object.freeze({
     ArrowLeft: {axis: "yaw", sign: -1},
 });
 
+// Down is positive in this stack, so E (deeper) is +1 on both the setpoint and
+// the force axis.
 const DEPTH_KEYS = Object.freeze({
-    KeyE: +1,   // deeper: down is positive in this stack
-    KeyQ: -1,   // shallower
+    KeyE: +1,
+    KeyQ: -1,
+});
+
+/** What Q/E should drive, given the vehicle mode. */
+const VERTICAL = Object.freeze({
+    none: "none",
+    force: "force",        // open-loop force.z, MANUAL
+    setpoint: "setpoint",  // control/targets/depth_m, depth hold running
 });
 
 class KeyboardPilot {
@@ -32,7 +46,8 @@ class KeyboardPilot {
      * @param socket       GuiSocket
      * @param protocol     GuiProtocol
      * @param options      {getEnabled, getTargetDepth, onState}
-     *   getEnabled     () => bool   — gate; keys are ignored when false
+     *   getEnabled     () => bool   — gate for WASD/arrows (MANUAL only)
+     *   getVerticalMode () => "none" | "force" | "setpoint" — what Q/E drives
      *   getTargetDepth () => number — current setpoint, for Q/E stepping
      *   onState        (state) => void — for the on-screen key map
      */
@@ -40,12 +55,14 @@ class KeyboardPilot {
         this.socket = socket;
         this.protocol = protocol;
         this.getEnabled = options.getEnabled || (() => true);
+        this.getVerticalMode = options.getVerticalMode || (() => VERTICAL.none);
         this.getTargetDepth = options.getTargetDepth || (() => 0);
         this.onState = options.onState || (() => {});
 
         this.translationForceN = 20;
         this.yawTorqueNm = 10;
         this.depthStepM = 0.05;
+        this.heaveForceN = 15;
 
         this.held = new Set();
         this._wrenchTimer = null;
@@ -108,13 +125,20 @@ class KeyboardPilot {
             return;
         }
         if (DEPTH_KEYS[event.code]) {
-            if (!this.getEnabled()) {
+            const vertical = this.getVerticalMode();
+            if (vertical === VERTICAL.none) {
                 return;
             }
             event.preventDefault();
             this.held.add(event.code);
-            this._stepDepth(DEPTH_KEYS[event.code]);
-            this._startDepthRepeat();
+            if (vertical === VERTICAL.setpoint) {
+                // Discrete: step once now, then repeat on a slower timer than
+                // the wrench so a held key walks the setpoint smoothly.
+                this._stepDepth(DEPTH_KEYS[event.code]);
+                this._startDepthRepeat();
+            }
+            // In force mode nothing to do here — _publishWrench picks the key
+            // up on its next tick along with WASD.
             this._emitState();
         }
     };
@@ -169,11 +193,18 @@ class KeyboardPilot {
 
     /** Compose every held key into one wrench. */
     axes() {
-        const totals = {surge: 0, sway: 0, yaw: 0};
+        const totals = {surge: 0, sway: 0, yaw: 0, heave: 0};
         for (const code of this.held) {
             const mapping = AXES[code];
             if (mapping) {
                 totals[mapping.axis] += mapping.sign;
+            }
+        }
+        if (this.getVerticalMode() === VERTICAL.force) {
+            for (const [code, sign] of Object.entries(DEPTH_KEYS)) {
+                if (this.held.has(code)) {
+                    totals.heave += sign;
+                }
             }
         }
         // Opposite keys held together cancel, which is what the operator sees
@@ -182,13 +213,15 @@ class KeyboardPilot {
             surge: Math.sign(totals.surge),
             sway: Math.sign(totals.sway),
             yaw: Math.sign(totals.yaw),
+            heave: Math.sign(totals.heave),
         };
     }
 
     _publishWrench = () => {
         const enabled = this.getEnabled();
-        const axes = enabled ? this.axes() : {surge: 0, sway: 0, yaw: 0};
-        const active = axes.surge !== 0 || axes.sway !== 0 || axes.yaw !== 0;
+        const axes = enabled ? this.axes() : {surge: 0, sway: 0, yaw: 0, heave: 0};
+        const active = axes.surge !== 0 || axes.sway !== 0
+            || axes.yaw !== 0 || axes.heave !== 0;
 
         // Publish while any key is down, plus exactly one zero frame on release
         // so the bus is explicitly cleared instead of relying on the source
@@ -202,7 +235,7 @@ class KeyboardPilot {
             force: {
                 x: axes.surge * this.translationForceN,
                 y: axes.sway * this.translationForceN,
-                z: 0,
+                z: axes.heave * this.heaveForceN,
             },
             torque: {
                 x: 0,

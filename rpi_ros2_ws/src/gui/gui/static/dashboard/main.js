@@ -147,8 +147,21 @@ function applyMode(mode) {
 
 // ------------------------------------------------------------------ keyboard
 
+function depthHoldActive() {
+    return state.mode === protocol.modes.depthHold
+        || state.mode === protocol.modes.autonomousAndDepthHold;
+}
+
 const pilot = new window.KeyboardPilot(socket, protocol, {
     getEnabled: () => state.mode === protocol.modes.manual,
+    // Q/E cannot always mean the same thing. MANUAL deactivates the depth PID,
+    // so a setpoint there would go to a controller that is not running; depth
+    // hold has the PID flying the vehicle, so raw force would fight it.
+    getVerticalMode: () => {
+        if (state.mode === protocol.modes.manual) return "force";
+        if (depthHoldActive()) return "setpoint";
+        return "none";
+    },
     getTargetDepth: () => state.targetDepth,
     onState: (s) => {
         document.querySelectorAll(".key").forEach((el) => {
@@ -159,11 +172,24 @@ const pilot = new window.KeyboardPilot(socket, protocol, {
 pilot.start();
 
 function updateKeyboardAvailability() {
-    const active = state.mode === protocol.modes.manual;
+    const manual = state.mode === protocol.modes.manual;
+    const holding = depthHoldActive();
+    const active = manual || holding;
     setPill("keyboard_pill", active ? "active" : "inactive", active ? "ok" : "");
-    $("keyboard_hint").textContent = active
-        ? "Hold keys to pilot. Releasing or leaving the tab stops output."
-        : "Enable Manual to pilot from the keyboard.";
+
+    if (manual) {
+        $("keyboard_hint").textContent =
+            "Manual: all keys drive thrust directly. Q/E is vertical force — "
+            + "the depth PID is off in this mode.";
+    } else if (holding) {
+        $("keyboard_hint").textContent =
+            "Depth hold: Q/E moves the depth setpoint. WASD needs Manual.";
+    } else {
+        $("keyboard_hint").textContent =
+            "Enable Manual (thrust) or Depth hold (setpoint) to use the keyboard.";
+    }
+    $("kb_vertical_note").textContent = manual
+        ? "vertical force" : holding ? "depth setpoint" : "unavailable";
 }
 
 $("kb_force_input").addEventListener("change", (e) => {
@@ -174,6 +200,9 @@ $("kb_torque_input").addEventListener("change", (e) => {
 });
 $("kb_depth_step_input").addEventListener("change", (e) => {
     pilot.depthStepM = Number(e.target.value) || 0;
+});
+$("kb_heave_input").addEventListener("change", (e) => {
+    pilot.heaveForceN = Number(e.target.value) || 0;
 });
 
 // -------------------------------------------------------------------- camera
