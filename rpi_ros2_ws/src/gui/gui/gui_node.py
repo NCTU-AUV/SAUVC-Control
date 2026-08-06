@@ -249,6 +249,10 @@ class GUINode(Node):
         self.declare_parameter(
             "bag_dir", os.environ.get("ORCA_BAG_DIR", "/root/bags"))
         self._bag_status_timer = self.create_timer(2.0, self._publish_bag_status)
+        # Re-resolved periodically: the autonomy stack needs minutes to come
+        # up, so a list sent once at connect would leave the detection view
+        # permanently marked unavailable.
+        self._camera_timer = self.create_timer(5.0, self._publish_camera_sources)
 
         self._start_mission_publisher = self.create_publisher(
             Bool,
@@ -318,25 +322,32 @@ class GUINode(Node):
         """
         port = self.get_parameter("web_video_server_port") \
             .get_parameter_value().integer_value
-        sources = [
-            {
-                "id": "front",
-                "label": "Front camera",
-                "topics": [self._param_str("camera_front_topic"),
-                           self._param_str("camera_sim_front_topic")],
-            },
-            {
-                "id": "detections",
-                "label": "Detections",
-                "topics": [self._param_str("camera_detections_topic")],
-            },
-            {
-                "id": "bottom",
-                "label": "Bottom camera",
-                "topics": [self._param_str("camera_bottom_topic"),
-                           self._param_str("camera_sim_bottom_topic")],
-            },
+        candidates = [
+            ("front", "Front camera",
+             ["camera_front_topic", "camera_sim_front_topic"]),
+            ("detections", "Detections",
+             ["camera_detections_topic"]),
+            ("bottom", "Bottom camera",
+             ["camera_bottom_topic", "camera_sim_bottom_topic"]),
         ]
+
+        # Resolve against the live graph here rather than letting the browser
+        # probe. An <img> pointed at an MJPEG stream never fires load or error
+        # reliably — the response is an endless multipart body — so a frontend
+        # fallback cannot tell "no publisher" from "first frame still coming".
+        # This node already knows which topics exist.
+        live = {name for name, _ in self.get_topic_names_and_types()}
+        sources = []
+        for source_id, label, param_names in candidates:
+            topics = [self._param_str(name) for name in param_names]
+            resolved = next((t for t in topics if t in live), None)
+            sources.append({
+                "id": source_id,
+                "label": label,
+                "topic": resolved or topics[0],
+                "available": resolved is not None,
+            })
+
         self.aiohttp_server.send_topic(
             protocol.TOPIC_CAMERA_SOURCES,
             {"port": port, "sources": sources},
