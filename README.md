@@ -9,31 +9,31 @@
 ## 這個 repo 負責什麼
 
 ```text
-      SAUVC-JETSON（另一個 container）
-      感知 → BehaviorTree 決策
-              │
-              │  control/wrench_sources/decision   (Wrench, 50 Hz)
-              │  control/targets/depth_m           (Float64)
-              ▼
-  ┌───────────────────────────────────────────────────────────┐
-  │  本 repo                                                   │
-  │                                                            │
-  │  STM32 ──► sensors ──► state/depth_m ──► 深度 PID ──┐      │
-  │  (壓力/IMU)                                          │      │
-  │                                                      ▼      │
-  │  GUI 手動 ──────────────────► control/wrench_sources/*      │
-  │  Autonomy 決策 ─────────────►        │                      │
-  │                                       ▼                     │
-  │                                  wrench_sum                 │
-  │                                       │ control/wrench_command
-  │                                       ▼                     │
-  │                          推力分配（偽逆 + 飽和限幅）         │
-  │                                       │                     │
-  │                        ┌──────────────┴──────────────┐      │
-  │                        ▼                             ▼      │
-  │                  力→PWM→STM32                  ros_gz_bridge│
-  │                    （實機）                       （模擬）   │
-  └───────────────────────────────────────────────────────────┘
+   SAUVC-JETSON  (separate container)
+   perception -> BehaviorTree decision
+            |
+            |  control/wrench_sources/decision  (Wrench, 50 Hz)
+            |  control/targets/depth_m          (Float64)
+            v
++-----------------------------------------------------------------------+
+| this repo                                                             |
+|                                                                       |
+|  STM32 ------> sensors ------> state/depth_m ------> depth PID        |
+|  (pressure/IMU)                                          |            |
+|                                                          v            |
+|  GUI manual -----------------------> control/wrench_sources/*         |
+|  autonomy decision ----------------->        |                        |
+|                                              v                        |
+|                                         wrench_sum                    |
+|                                              |  control/wrench_command|
+|                                              v                        |
+|                   thrust allocation (pseudo-inverse + clamp)          |
+|                                              |                        |
+|                        +---------------------+---------------------+  |
+|                        v                                           v  |
+|               force -> PWM -> STM32                     ros_gz_bridge |
+|                   (hardware)                              (simulation)|
++-----------------------------------------------------------------------+
 ```
 
 核心設計是 **wrench 匯流排**：所有「想讓載具動」的來源（深度 PID、GUI 手動、
