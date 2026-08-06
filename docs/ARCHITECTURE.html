@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>架構：載具控制堆疊 · SAUVC-RPI</title>
+<style>
+/* ─────────────────────────────  design tokens  ───────────────────────────── */
+:root{
+  color-scheme: light dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", "PingFang TC",
+               "Microsoft JhengHei", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+               "Noto Sans Mono CJK TC", monospace;
+
+  --bg:        #fafafc;
+  --surface:   #ffffff;
+  --surface-2: #f2f3f7;
+  --surface-3: #e9ebf1;
+  --border:    #e0e3ec;
+  --border-2:  #cbd0dd;
+  --fg:        #171a21;
+  --fg-dim:    #5b6274;
+  --fg-faint:  #868da0;
+  --accent:    #3d5afe;
+  --accent-bg: #eceffe;
+
+  --sense:     #0e7490;  --sense-bg:   #e6f7fb;
+  --perceive:  #6d28d9;  --perceive-bg:#f1ecfe;
+  --decide:    #b45309;  --decide-bg:  #fdf3e3;
+  --control:   #047857;  --control-bg: #e5f7f0;
+  --danger:    #c81e3a;  --danger-bg:  #fdecef;
+  --neutral:   #52596b;  --neutral-bg: #f0f1f5;
+
+  --edge:      #8b93a7;
+  --shadow:    0 1px 2px rgba(16,20,32,.06), 0 4px 14px rgba(16,20,32,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d0f14; --surface:#141821; --surface-2:#1a1f2a; --surface-3:#222835;
+    --border:#262d3b; --border-2:#364052; --fg:#e5e8f0; --fg-dim:#98a1b5; --fg-faint:#6d7688;
+    --accent:#8098ff; --accent-bg:#1a2140;
+    --sense:#38d3ee; --sense-bg:#0d2a33; --perceive:#b39cfb; --perceive-bg:#241c3e;
+    --decide:#fbbf3c; --decide-bg:#33270d; --control:#3ddba3; --control-bg:#0c2c22;
+    --danger:#ff8095; --danger-bg:#3a1620; --neutral:#9aa3b7; --neutral-bg:#1c212c;
+    --edge:#6b748a; --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d0f14; --surface:#141821; --surface-2:#1a1f2a; --surface-3:#222835;
+  --border:#262d3b; --border-2:#364052; --fg:#e5e8f0; --fg-dim:#98a1b5; --fg-faint:#6d7688;
+  --accent:#8098ff; --accent-bg:#1a2140;
+  --sense:#38d3ee; --sense-bg:#0d2a33; --perceive:#b39cfb; --perceive-bg:#241c3e;
+  --decide:#fbbf3c; --decide-bg:#33270d; --control:#3ddba3; --control-bg:#0c2c22;
+  --danger:#ff8095; --danger-bg:#3a1620; --neutral:#9aa3b7; --neutral-bg:#1c212c;
+  --edge:#6b748a; --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.28);
+}
+
+*,*::before,*::after{ box-sizing:border-box; }
+html{ scroll-behavior:smooth; scroll-padding-top:80px; }
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--font-sans); font-size:15.5px; line-height:1.75;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+
+/* ─────────────────────────────  layout  ───────────────────────────── */
+.topbar{
+  position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:14px;
+  padding:0 20px; height:56px;
+  background:color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter:saturate(180%) blur(12px);
+  border-bottom:1px solid var(--border);
+}
+.topbar .brand{ font-weight:700; font-size:14px; }
+.topbar .brand span{ color:var(--fg-faint); font-weight:500; }
+.topbar .sp{ flex:1; }
+.btn{
+  display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 11px;
+  border:1px solid var(--border); border-radius:8px; background:var(--surface);
+  color:var(--fg-dim); font:inherit; font-size:12.5px; cursor:pointer;
+  text-decoration:none; white-space:nowrap;
+}
+.btn:hover{ border-color:var(--border-2); color:var(--fg); }
+#navtoggle{ display:none; }
+
+.layout{ display:grid; grid-template-columns:270px minmax(0,1fr); }
+.sidebar{
+  position:sticky; top:56px; align-self:start; height:calc(100vh - 56px);
+  overflow-y:auto; overscroll-behavior:contain;
+  padding:22px 12px 60px 20px; border-right:1px solid var(--border);
+}
+.sidebar .toc-h{
+  font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--fg-faint); padding:0 10px; margin:0 0 10px;
+}
+.sidebar a{
+  display:block; padding:5px 10px; border-radius:7px; text-decoration:none;
+  color:var(--fg-dim); font-size:13.5px; line-height:1.45;
+}
+.sidebar a:hover{ background:var(--surface-2); color:var(--fg); }
+.sidebar a.sub{ padding-left:24px; font-size:12.5px; color:var(--fg-faint); }
+.sidebar a.active{ color:var(--accent); background:var(--accent-bg); font-weight:600; }
+
+main{ min-width:0; padding:40px 44px 120px; max-width:1180px; }
+
+/* ─────────────────────────────  hero  ───────────────────────────── */
+.hero{ margin-bottom:44px; }
+.hero .kicker{
+  font-size:11.5px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--control); margin-bottom:10px;
+}
+.hero h1{ font-size:38px; line-height:1.2; margin:0 0 14px; letter-spacing:-.02em; }
+.hero .lede{ font-size:17px; color:var(--fg-dim); margin:0 0 20px; max-width:74ch; }
+.chips{ display:flex; flex-wrap:wrap; gap:7px; }
+.chip{
+  display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:999px;
+  background:var(--surface-2); border:1px solid var(--border);
+  font-size:11.5px; font-family:var(--font-mono); color:var(--fg-dim);
+}
+.chip b{ color:var(--fg); font-weight:600; }
+
+/* ─────────────────────────────  typography  ───────────────────────────── */
+h2{
+  font-size:25px; letter-spacing:-.01em; margin:62px 0 6px; padding-top:16px;
+  border-top:1px solid var(--border); scroll-margin-top:76px;
+}
+h2 .num{ color:var(--fg-faint); font-weight:500; margin-right:10px; font-variant-numeric:tabular-nums; }
+h3{ font-size:18px; margin:34px 0 4px; scroll-margin-top:76px; }
+h4{ font-size:15px; margin:24px 0 2px; }
+p{ margin:12px 0; max-width:80ch; }
+a{ color:var(--accent); text-decoration-thickness:1px; text-underline-offset:2px; }
+strong{ font-weight:650; }
+ul,ol{ max-width:80ch; padding-left:22px; }
+li{ margin:6px 0; }
+
+code{
+  font-family:var(--font-mono); font-size:.855em; padding:1.5px 5px; border-radius:5px;
+  background:var(--surface-2); border:1px solid var(--border); color:var(--fg);
+  word-break:break-word;
+}
+a code{ color:inherit; }
+code.t{ cursor:copy; background:var(--accent-bg); border-color:transparent; color:var(--accent); }
+code.t:hover{ box-shadow:inset 0 0 0 1px currentColor; }
+code.t.copied::after{ content:" ✓"; }
+pre{
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.65; margin:16px 0;
+}
+pre code{ background:none; border:0; padding:0; font-size:inherit; }
+del{ color:var(--fg-faint); }
+
+/* ─────────────────────────────  tables  ───────────────────────────── */
+.tbl-wrap{ overflow-x:auto; margin:18px 0; border:1px solid var(--border); border-radius:11px; background:var(--surface); }
+table{ border-collapse:collapse; width:100%; font-size:14px; }
+th,td{ text-align:left; padding:9px 14px; border-bottom:1px solid var(--border); vertical-align:top; }
+thead th{
+  background:var(--surface-2); font-size:11.5px; font-weight:700; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--fg-dim); white-space:nowrap;
+}
+tbody tr:last-child td{ border-bottom:0; }
+tbody tr:hover{ background:var(--surface-2); }
+td code, th code{ font-size:12.5px; }
+table.matrix td, table.matrix th{ text-align:center; }
+table.matrix td:first-child, table.matrix th:first-child,
+table.matrix td:last-child, table.matrix th:last-child{ text-align:left; }
+.yes{ color:var(--control); font-weight:700; }
+.no{ color:var(--fg-faint); }
+
+/* ─────────────────────────────  callouts  ───────────────────────────── */
+.callout{
+  margin:20px 0; padding:14px 18px 14px 16px; border-radius:10px;
+  border:1px solid var(--border); border-left:3px solid var(--neutral);
+  background:var(--surface); box-shadow:var(--shadow);
+}
+.callout > :first-child{ margin-top:0; } .callout > :last-child{ margin-bottom:0; }
+.callout .ct{
+  display:flex; align-items:center; gap:7px; font-size:11.5px; font-weight:700;
+  letter-spacing:.08em; text-transform:uppercase; margin-bottom:6px; color:var(--neutral);
+}
+.callout.danger{ border-left-color:var(--danger); background:var(--danger-bg); }
+.callout.danger .ct{ color:var(--danger); }
+.callout.warn{ border-left-color:var(--decide); background:var(--decide-bg); }
+.callout.warn .ct{ color:var(--decide); }
+.callout.note{ border-left-color:var(--accent); background:var(--accent-bg); }
+.callout.note .ct{ color:var(--accent); }
+.callout.ok{ border-left-color:var(--control); background:var(--control-bg); }
+.callout.ok .ct{ color:var(--control); }
+
+/* ─────────────────────────────  cards  ───────────────────────────── */
+.grid{ display:grid; gap:14px; margin:18px 0; }
+.grid.c2{ grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
+.grid.c3{ grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); }
+.card{
+  background:var(--surface); border:1px solid var(--border); border-radius:11px;
+  padding:14px 16px; box-shadow:var(--shadow);
+}
+.card h4{ margin:0 0 4px; font-size:14px; }
+.card p{ margin:4px 0 0; font-size:13.5px; color:var(--fg-dim); }
+.card .tag{
+  display:inline-block; font-family:var(--font-mono); font-size:10.5px; padding:1px 7px;
+  border-radius:999px; margin-bottom:7px;
+}
+.tag.sense{ background:var(--sense-bg); color:var(--sense); }
+.tag.perceive{ background:var(--perceive-bg); color:var(--perceive); }
+.tag.decide{ background:var(--decide-bg); color:var(--decide); }
+.tag.control{ background:var(--control-bg); color:var(--control); }
+.tag.danger{ background:var(--danger-bg); color:var(--danger); }
+.tag.neutral{ background:var(--neutral-bg); color:var(--neutral); }
+
+/* ─────────────────────────────  figures / svg  ───────────────────────────── */
+figure{
+  margin:26px 0; padding:18px 18px 12px; background:var(--surface);
+  border:1px solid var(--border); border-radius:13px; box-shadow:var(--shadow); overflow-x:auto;
+}
+figure svg{ display:block; width:100%; height:auto; min-width:620px; font-family:var(--font-sans); }
+figcaption{
+  margin-top:12px; padding-top:10px; border-top:1px dashed var(--border);
+  font-size:12.5px; color:var(--fg-faint);
+}
+figcaption b{ color:var(--fg-dim); font-weight:650; }
+.legend{ display:flex; flex-wrap:wrap; gap:16px; margin-top:10px; font-size:12px; color:var(--fg-faint); }
+.legend i{ display:inline-flex; align-items:center; gap:6px; font-style:normal; }
+.legend .swatch{ width:22px; height:0; border-top:2px solid var(--edge); }
+.legend .swatch.d{ border-top-style:dashed; }
+.legend .sq{ width:12px; height:12px; border-radius:3px; border:1px solid var(--border-2); }
+
+svg .band{ fill:var(--surface-2); stroke:var(--border); stroke-dasharray:5 5; }
+svg .band-l{ font-size:11.5px; font-weight:700; letter-spacing:.1em; }
+svg .box{ fill:var(--surface); stroke:var(--border-2); stroke-width:1.25; }
+svg .t1{ font-size:12.5px; font-weight:620; fill:var(--fg); }
+svg .t2{ font-size:10.5px; fill:var(--fg-dim); }
+svg .t3{ font-size:9.5px; fill:var(--fg-faint); }
+svg .mono{ font-family:var(--font-mono); }
+svg .edge{ fill:none; stroke:var(--edge); stroke-width:1.5; stroke-linejoin:round; stroke-linecap:round; }
+svg .edge.dash{ stroke-dasharray:5 4; }
+svg .edge.thin{ stroke-width:1.15; }
+svg .bus{ fill:none; stroke:var(--control); stroke-width:3.5; stroke-linecap:round; }
+svg .ah{ fill:var(--edge); }
+svg .ahc{ fill:var(--control); }  svg .ahd{ fill:var(--decide); }
+svg .ahn{ fill:var(--neutral); }
+
+svg .b-sense{ fill:var(--sense-bg); stroke:var(--sense); }
+svg .b-perceive{ fill:var(--perceive-bg); stroke:var(--perceive); }
+svg .b-decide{ fill:var(--decide-bg); stroke:var(--decide); }
+svg .b-control{ fill:var(--control-bg); stroke:var(--control); }
+svg .b-danger{ fill:var(--danger-bg); stroke:var(--danger); }
+svg .b-neutral{ fill:var(--neutral-bg); stroke:var(--neutral); }
+svg .l-sense{ fill:var(--sense); } svg .l-perceive{ fill:var(--perceive); }
+svg .l-decide{ fill:var(--decide); } svg .l-control{ fill:var(--control); }
+svg .l-danger{ fill:var(--danger); } svg .l-neutral{ fill:var(--neutral); }
+svg .bar-req{ fill:none; stroke:var(--fg-faint); stroke-width:1.2; stroke-dasharray:3 2; }
+svg .bar-ok{ fill:var(--control); opacity:.85; }
+svg .bar-bad{ fill:var(--danger); opacity:.85; }
+svg .limit{ stroke:var(--danger); stroke-width:1.2; stroke-dasharray:6 4; fill:none; }
+
+/* ─────────────────────────────  misc  ───────────────────────────── */
+.anchor{ opacity:0; margin-left:8px; font-size:.62em; color:var(--fg-faint); text-decoration:none; }
+h2:hover .anchor, h3:hover .anchor{ opacity:1; }
+.tree{
+  font-family:var(--font-mono); font-size:13px; line-height:1.9; background:var(--surface);
+  border:1px solid var(--border); border-radius:11px; padding:16px 18px; margin:18px 0; overflow-x:auto;
+}
+.tree .c{ color:var(--fg-faint); }
+.tree .k{ color:var(--control); font-weight:600; }
+.issue{
+  display:flex; gap:14px; padding:14px 16px; margin:12px 0; background:var(--surface);
+  border:1px solid var(--border); border-radius:11px; box-shadow:var(--shadow);
+}
+.issue .n{
+  flex:0 0 26px; height:26px; border-radius:8px; background:var(--danger-bg); color:var(--danger);
+  font-size:12.5px; font-weight:700; display:grid; place-items:center;
+}
+.issue .body{ min-width:0; } .issue .body > :first-child{ margin-top:0; }
+.issue .body > :last-child{ margin-bottom:0; }
+.issue.fixed .n{ background:var(--control-bg); color:var(--control); }
+
+@media (max-width:1080px){
+  .layout{ grid-template-columns:1fr; }
+  #navtoggle{ display:inline-flex; }
+  .sidebar{
+    position:fixed; inset:56px auto 0 0; width:280px; z-index:40; background:var(--bg);
+    transform:translateX(-102%); transition:transform .22s ease; box-shadow:var(--shadow);
+  }
+  .sidebar.open{ transform:none; }
+  main{ padding:32px 22px 100px; }
+  .hero h1{ font-size:30px; }
+}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="a" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+  <marker id="ac" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahc"/></marker>
+  <marker id="ad" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahd"/></marker>
+  <marker id="an" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ahn"/></marker>
+  <marker id="ax" viewBox="0 0 10 10" refX="9.2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--danger)"/></marker>
+</defs></svg>
+
+<header class="topbar">
+  <button class="btn" id="navtoggle" aria-label="目錄">☰</button>
+  <div class="brand">SAUVC-RPI <span>/ ARCHITECTURE</span></div>
+  <div class="sp"></div>
+  <a class="btn" href="../README.md">README</a>
+  <a class="btn" href="../../SAUVC-JETSON/ARCHITECTURE.html">感知決策堆疊架構 →</a>
+  <button class="btn" id="theme" title="切換主題">◐</button>
+</header>
+
+<div class="layout">
+<aside class="sidebar" id="sidebar">
+  <p class="toc-h">目錄</p>
+  <nav id="toc">
+    <a href="#s1">1 · 定位與邊界</a>
+    <a href="#s2">2 · 核心設計：wrench 匯流排</a>
+    <a href="#s3">3 · 感測層 sensors</a>
+    <a href="#s4">4 · 控制層 control</a>
+    <a href="#s4-1" class="sub">4.1 通用 PID</a>
+    <a href="#s4-2" class="sub">4.2 深度力 → wrench</a>
+    <a href="#s4-3" class="sub">4.3 為什麼用 Lifecycle</a>
+    <a href="#s5">5 · 致動層 thrusters</a>
+    <a href="#s5-1" class="sub">5.1 加總</a>
+    <a href="#s5-2" class="sub">5.2 分配與飽和</a>
+    <a href="#s5-3" class="sub">5.3 力 → PWM</a>
+    <a href="#s6">6 · 系統管理 system_manager</a>
+    <a href="#s6-1" class="sub">6.1 控制模式</a>
+    <a href="#s6-2" class="sub">6.2 安全檢查</a>
+    <a href="#s6-3" class="sub">6.3 介面</a>
+    <a href="#s7">7 · 操作介面 gui</a>
+    <a href="#s8">8 · 啟動與設定</a>
+    <a href="#s9">9 · 外部邊界</a>
+    <a href="#s10">10 · 已知問題</a>
+  </nav>
+</aside>
+
+<main>
+
+<div class="hero">
+  <div class="kicker">載具控制堆疊</div>
+  <h1>架構：載具控制堆疊</h1>
+  <p class="lede">
+    本文說明 ROS 2 workspace（<code>rpi_ros2_ws</code>）<b>怎麼運作</b>：各 package 的職責、
+    node、topic、service、訊息型別，以及每一層「為什麼這樣設計」。
+  </p>
+  <div class="chips">
+    <span class="chip"><b>ROS 2</b> Humble</span>
+    <span class="chip"><b>Lifecycle Node</b></span>
+    <span class="chip"><b>wrench 匯流排</b></span>
+    <span class="chip"><b>8</b> thrusters</span>
+    <span class="chip"><b>micro-ROS</b> STM32</span>
+  </div>
+</div>
+
+<div class="callout note">
+  <div class="ct">閱讀前提</div>
+  <p>安裝與啟動指令在 <a href="../README.md">README.md</a>。假設讀者具備 ROS 2 基礎
+  （node / topic / service / QoS / launch）；對 Lifecycle Node、wrench 匯流排這類本專案特有的設計會補充動機。</p>
+  <p>所有 topic 名稱皆為 <b>remap 前的相對名稱</b>，執行時包在 launch 的 <code>namespace</code> 參數
+  （預設 <code>orca_auv</code>）之下 —— 例如 <code>control/wrench_command</code> 實際上是
+  <code>/orca_auv/control/wrench_command</code>。</p>
+</div>
+
+<!-- ══════════════════════════════ 1 ══════════════════════════════ -->
+<h2 id="s1"><span class="num">01</span>定位與邊界<a class="anchor" href="#s1">#</a></h2>
+
+<p>這個 repo 是 Orca AUV 的<b>載具控制堆疊</b>：把「目標」變成「推進器出力」。</p>
+
+<p>它<b>不做</b>物件偵測、不做任務規劃 —— 那些在姊妹 repo
+<a href="../../SAUVC-JETSON/ARCHITECTURE.html"><code>SAUVC-JETSON</code></a>
+（感知 + BehaviorTree 決策，本文以下稱 Autonomy 堆疊）。兩者跑在同一塊 Jetson Orin NX 上的
+兩個獨立 container，只透過 ROS 2 topic 溝通。</p>
+
+<figure>
+<svg viewBox="0 0 1120 540" role="img" aria-label="控制堆疊系統總覽">
+  <!-- external wrench sources (top) -->
+  <rect class="box b-decide" x="600" y="12" width="170" height="56" rx="9"/>
+  <text class="t1" x="685" y="34" text-anchor="middle">SAUVC-JETSON</text>
+  <text class="t2" x="685" y="52" text-anchor="middle">決策堆疊 · 50 Hz</text>
+  <rect class="box b-perceive" x="794" y="12" width="140" height="56" rx="9"/>
+  <text class="t1 mono" x="864" y="34" text-anchor="middle" style="font-size:11.5px">gui_node</text>
+  <text class="t2" x="864" y="52" text-anchor="middle">手動操作</text>
+
+  <!-- bands -->
+  <rect class="band" x="8"   y="96" width="196" height="284" rx="10"/>
+  <rect class="band" x="220" y="96" width="196" height="284" rx="10"/>
+  <rect class="band" x="432" y="96" width="216" height="284" rx="10"/>
+  <rect class="band" x="664" y="96" width="216" height="284" rx="10"/>
+  <rect class="band" x="896" y="96" width="216" height="284" rx="10"/>
+  <text class="band-l l-sense"   x="22"  y="86">感測輸入</text>
+  <text class="band-l l-sense"   x="234" y="86">感測層 sensors</text>
+  <text class="band-l l-decide"  x="446" y="86">控制層 control</text>
+  <text class="band-l l-control" x="678" y="86">致動層 thrusters</text>
+  <text class="band-l l-neutral" x="910" y="86">輸出</text>
+
+  <!-- band A -->
+  <rect class="box b-sense" x="22" y="120" width="168" height="40" rx="7"/>
+  <text class="t2 mono" x="106" y="136" text-anchor="middle">sensors/depth_m</text>
+  <text class="t3" x="106" y="151" text-anchor="middle">Float32</text>
+  <rect class="box b-sense" x="22" y="170" width="168" height="40" rx="7"/>
+  <text class="t2 mono" x="106" y="186" text-anchor="middle">sensors/imu</text>
+  <text class="t3" x="106" y="201" text-anchor="middle">Imu</text>
+  <rect class="box b-danger" x="22" y="220" width="168" height="40" rx="7"/>
+  <text class="t2 mono" x="106" y="236" text-anchor="middle">sensors/killed</text>
+  <text class="t3" x="106" y="251" text-anchor="middle">kill switch</text>
+  <rect class="box b-danger" x="22" y="270" width="168" height="40" rx="7"/>
+  <text class="t2 mono" x="106" y="286" text-anchor="middle">thrusters/enabled</text>
+  <text class="t3" x="106" y="301" text-anchor="middle">Bool</text>
+  <text class="t3" x="22" y="345">來自 STM32 韌體</text>
+  <text class="t3" x="22" y="360">（micro-ROS · serial）</text>
+
+  <!-- band B -->
+  <rect class="box b-sense" x="234" y="120" width="168" height="58" rx="8"/>
+  <text class="t2 mono" x="318" y="136" text-anchor="middle" style="font-size:9.5px">float32_to_float64_</text>
+  <text class="t2 mono" x="318" y="150" text-anchor="middle" style="font-size:9.5px">converter_node</text>
+  <text class="t3 mono l-sense" x="318" y="168" text-anchor="middle">→ state/depth_m</text>
+  <rect class="box b-sense" x="234" y="190" width="168" height="58" rx="8"/>
+  <text class="t2 mono" x="318" y="206" text-anchor="middle" style="font-size:9.5px">imu_to_orientation_</text>
+  <text class="t2 mono" x="318" y="220" text-anchor="middle" style="font-size:9.5px">node</text>
+  <text class="t3 mono l-sense" x="318" y="238" text-anchor="middle">→ state/orientation</text>
+  <text class="t3" x="234" y="345">不做濾波</text>
+  <text class="t3" x="234" y="360">不做感測器融合</text>
+
+  <!-- band C -->
+  <rect class="box b-decide" x="446" y="120" width="188" height="52" rx="8"/>
+  <text class="t2 mono" x="540" y="137" text-anchor="middle" style="font-size:9.5px">depth_pid_controller_node</text>
+  <text class="t3" x="540" y="158" text-anchor="middle">Lifecycle · 通用 PID</text>
+  <rect class="box b-decide" x="446" y="200" width="188" height="58" rx="8"/>
+  <text class="t2 mono" x="540" y="216" text-anchor="middle" style="font-size:9.5px">output_sink_force_to_</text>
+  <text class="t2 mono" x="540" y="230" text-anchor="middle" style="font-size:9.5px">output_wrench_node</text>
+  <text class="t3" x="540" y="248" text-anchor="middle">＋ depth_force_bias_N</text>
+  <text class="t3" x="446" y="345">增益每個控制迴圈重讀</text>
+  <text class="t3" x="446" y="360">ros2 param set 立即生效</text>
+
+  <!-- band D -->
+  <rect class="box b-control" x="678" y="120" width="188" height="52" rx="8"/>
+  <text class="t2 mono" x="772" y="137" text-anchor="middle" style="font-size:10px">wrench_sum_node</text>
+  <text class="t3" x="772" y="158" text-anchor="middle">Lifecycle · Σ ＋ 每來源 timeout</text>
+  <rect class="box b-control" x="678" y="200" width="188" height="58" rx="8"/>
+  <text class="t2 mono" x="772" y="216" text-anchor="middle" style="font-size:9.5px">wrench_to_individual_</text>
+  <text class="t2 mono" x="772" y="230" text-anchor="middle" style="font-size:9.5px">thrusters</text>
+  <text class="t3" x="772" y="248" text-anchor="middle">偽逆分配 ＋ 飽和限幅</text>
+  <rect class="box b-control" x="678" y="284" width="188" height="52" rx="8"/>
+  <text class="t2 mono" x="772" y="301" text-anchor="middle" style="font-size:9.5px">thruster_force_to_pwm</text>
+  <text class="t3" x="772" y="322" text-anchor="middle">僅實機 · 查表擬合</text>
+
+  <!-- band E -->
+  <rect class="box b-neutral" x="910" y="200" width="188" height="52" rx="8"/>
+  <text class="t1 mono" x="1004" y="219" text-anchor="middle" style="font-size:11px">ros_gz_bridge</text>
+  <text class="t3" x="1004" y="238" text-anchor="middle">模擬</text>
+  <rect class="box b-neutral" x="910" y="284" width="188" height="52" rx="8"/>
+  <text class="t1" x="1004" y="303" text-anchor="middle">STM32 韌體</text>
+  <text class="t3 mono" x="1004" y="322" text-anchor="middle">thrusters/pwm_us</text>
+
+  <!-- data edges -->
+  <path class="edge" d="M190,140 L212,140 L212,149 L228,149" marker-end="url(#a)"/>
+  <path class="edge" d="M190,190 L212,190 L212,219 L228,219" marker-end="url(#a)"/>
+  <path class="edge" d="M402,149 L440,146" marker-end="url(#a)"/>
+  <path class="edge" d="M402,219 L420,219 L420,229 L440,229" marker-end="url(#a)"/>
+  <path class="edge" d="M540,172 L540,194" marker-end="url(#a)"/>
+  <text class="t3 mono" x="546" y="188">sink_force_N</text>
+  <path class="edge" d="M634,229 L654,229 L654,146 L672,146" marker-end="url(#ac)"/>
+  <text class="t3 mono l-control" x="660" y="196">wrench_sources/depth</text>
+  <path class="edge" d="M772,172 L772,194" marker-end="url(#a)"/>
+  <text class="t3 mono" x="778" y="188">wrench_command</text>
+  <path class="edge" d="M772,258 L772,278" marker-end="url(#a)"/>
+  <text class="t3 mono" x="778" y="272">force_N ×8</text>
+  <path class="edge" d="M866,229 L886,229 L886,226 L904,226" marker-end="url(#a)"/>
+  <path class="edge" d="M866,310 L904,310" marker-end="url(#a)"/>
+
+  <!-- external sources into the bus -->
+  <path class="edge" d="M685,68 L685,114" marker-end="url(#ac)"/>
+  <text class="t3 mono l-control" x="679" y="110" text-anchor="end">control/wrench_sources/decision</text>
+  <path class="edge" d="M864,68 L864,114" marker-end="url(#ac)"/>
+  <text class="t3 mono l-control" x="858" y="110" text-anchor="end">…/gui</text>
+
+  <!-- control plane -->
+  <rect class="box b-danger" x="432" y="430" width="216" height="80" rx="10"/>
+  <text class="t1 mono" x="540" y="452" text-anchor="middle" style="font-size:11.5px">supervisor_node</text>
+  <text class="t2" x="540" y="472" text-anchor="middle">ControlMode ＋ SafetyMonitor</text>
+  <text class="t3" x="540" y="492" text-anchor="middle">0.2 s 週期重新檢查安全前提</text>
+  <text class="band-l l-danger" x="432" y="412">控制平面（不搬資料，只決定誰能 active）</text>
+
+  <path class="edge dash" d="M190,240 L212,240 L212,470 L426,470" marker-end="url(#a)"/>
+  <path class="edge dash" d="M190,290 L206,290 L206,470"/>
+  <text class="t3" x="218" y="462">killed / enabled</text>
+  <path class="edge dash" d="M432,452 L424,452 L424,140 L440,140" marker-end="url(#ad)"/>
+  <path class="edge dash" d="M648,452 L662,452 L662,160 L672,160" marker-end="url(#ad)"/>
+  <text class="t3 l-danger" x="692" y="424">lifecycle configure / activate / deactivate</text>
+</svg>
+<figcaption><b>系統總覽。</b>實線＝資料流；虛線＝控制平面（lifecycle 轉換與安全訊號）。
+分配層之後路徑分岔：模擬只到「每顆推進器的力」，實機再多一段力→PWM。</figcaption>
+<div class="legend">
+  <i><span class="swatch"></span>資料流</i>
+  <i><span class="swatch d"></span>控制平面 / 安全訊號</i>
+  <i><span class="sq" style="background:var(--control-bg);border-color:var(--control)"></span>致動</i>
+  <i><span class="sq" style="background:var(--danger-bg);border-color:var(--danger)"></span>安全相關</i>
+</div>
+</figure>
+
+<div class="callout note">
+  <div class="ct">為什麼維持兩個 container 而非合併</div>
+  <ul>
+    <li><b>base image 無法調和</b>：CUDA devel + Isaac ROS 全家桶 vs 乾淨的 <code>ros:humble</code></li>
+    <li><b>改動頻率差距極大</b>：控制堆疊天天調參，Isaac 映像半年不動</li>
+    <li><b>故障隔離</b>：感知 OOM / GPU 異常不該拖垮推進器控制</li>
+  </ul>
+</div>
+
+<h4>外部介面（本 repo 是訂閱端）</h4>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Topic</th><th>型別</th><th>來源</th></tr></thead>
+<tbody>
+<tr><td><code class="t">control/wrench_sources/decision</code></td><td><code>geometry_msgs/Wrench</code></td><td>Autonomy 決策，50 Hz</td></tr>
+<tr><td><code class="t">control/targets/depth_m</code></td><td><code>std_msgs/Float64</code></td><td>Autonomy 決策 <b>或</b> GUI</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout danger">
+  <div class="ct">跨 container 通訊的前提</div>
+  <p>兩邊的 <code>RMW_IMPLEMENTATION</code>、<code>ROS_DOMAIN_ID</code> 與 DDS transport 必須一致。
+  特別是 <code>FASTDDS_BUILTIN_TRANSPORTS=UDPv4</code> —— 少了它，Fast DDS 會宣告共享記憶體 locator，
+  而兩個 container 的 <code>/dev/shm</code> 視野不同，participant 會 match 到但資料永遠走不通，
+  <b>且完全不報錯</b>。設定收斂在 <a href="../../.env"><code>.env</code></a>。</p>
+</div>
+
+<!-- ══════════════════════════════ 2 ══════════════════════════════ -->
+<h2 id="s2"><span class="num">02</span>核心設計：wrench 匯流排<a class="anchor" href="#s2">#</a></h2>
+
+<p>系統裡所有「想要移動載具」的來源，最終都只做一件事：發布一個
+<code>geometry_msgs/Wrench</code>（力 <code>force.xyz</code> ＋ 力矩 <code>torque.xyz</code>，載具座標系）
+到自己專屬的 <code>control/wrench_sources/*</code>。</p>
+
+<figure>
+<svg viewBox="0 0 1000 500" role="img" aria-label="wrench 匯流排">
+  <rect class="box b-perceive" x="20"  y="24" width="280" height="54" rx="9"/>
+  <text class="t1 mono" x="160" y="45" text-anchor="middle" style="font-size:11.5px">gui_node</text>
+  <text class="t2" x="160" y="64" text-anchor="middle">手動操作</text>
+  <rect class="box b-decide" x="350" y="24" width="280" height="54" rx="9"/>
+  <text class="t1 mono" x="490" y="45" text-anchor="middle" style="font-size:10.5px">output_sink_force_to_output_wrench_node</text>
+  <text class="t2" x="490" y="64" text-anchor="middle">深度軸（PID 輸出 ＋ bias）</text>
+  <rect class="box b-sense" x="680" y="24" width="280" height="54" rx="9"/>
+  <text class="t1" x="820" y="45" text-anchor="middle">Autonomy 堆疊</text>
+  <text class="t2" x="820" y="64" text-anchor="middle">SAUVC-JETSON 決策節點</text>
+
+  <rect class="box b-control" x="20"  y="110" width="280" height="34" rx="7"/>
+  <text class="t2 mono" x="160" y="127" text-anchor="middle" dominant-baseline="middle">control/wrench_sources/gui</text>
+  <rect class="box b-control" x="350" y="110" width="280" height="34" rx="7"/>
+  <text class="t2 mono" x="490" y="127" text-anchor="middle" dominant-baseline="middle">control/wrench_sources/depth</text>
+  <rect class="box b-control" x="680" y="110" width="280" height="34" rx="7"/>
+  <text class="t2 mono" x="820" y="127" text-anchor="middle" dominant-baseline="middle">control/wrench_sources/decision</text>
+
+  <path class="edge" d="M160,78 L160,104" marker-end="url(#ac)"/>
+  <path class="edge" d="M490,78 L490,104" marker-end="url(#ac)"/>
+  <path class="edge" d="M820,78 L820,104" marker-end="url(#ac)"/>
+
+  <path class="bus" d="M120,176 L860,176"/>
+  <path class="edge" d="M160,144 L160,172"/>
+  <path class="edge" d="M490,144 L490,172"/>
+  <path class="edge" d="M820,144 L820,172"/>
+  <text class="t3 l-control" x="112" y="168" text-anchor="end">匯流排</text>
+
+  <rect class="box b-control" x="340" y="206" width="320" height="78" rx="10"/>
+  <text class="t1 mono" x="500" y="228" text-anchor="middle" style="font-size:12px">wrench_sum_node</text>
+  <text class="t2" x="500" y="248" text-anchor="middle">Σ 加總 · Lifecycle</text>
+  <text class="t3" x="500" y="268" text-anchor="middle">每來源獨立 source_timeout_s（預設 0.5 s）→ 逾時歸零</text>
+  <path class="edge" d="M500,178 L500,200" marker-end="url(#ac)"/>
+
+  <rect class="box" x="390" y="312" width="220" height="34" rx="7"/>
+  <text class="t2 mono" x="500" y="329" text-anchor="middle" dominant-baseline="middle">control/wrench_command</text>
+  <path class="edge" d="M500,284 L500,306" marker-end="url(#a)"/>
+
+  <rect class="box b-control" x="310" y="374" width="380" height="56" rx="10"/>
+  <text class="t1 mono" x="500" y="395" text-anchor="middle" style="font-size:11px">wrench_to_individual_thrusters</text>
+  <text class="t2" x="500" y="414" text-anchor="middle">偽逆分配 ＋ 飽和限幅 → thruster_0..7/force_N</text>
+  <path class="edge" d="M500,346 L500,368" marker-end="url(#a)"/>
+
+  <rect class="box b-neutral" x="140" y="454" width="290" height="36" rx="8"/>
+  <text class="t2" x="285" y="472" text-anchor="middle" dominant-baseline="middle">實機：力 → PWM → STM32</text>
+  <rect class="box b-neutral" x="570" y="454" width="290" height="36" rx="8"/>
+  <text class="t2" x="715" y="472" text-anchor="middle" dominant-baseline="middle">模擬：ros_gz_bridge</text>
+  <path class="edge" d="M420,430 L420,442 L285,442 L285,448" marker-end="url(#a)"/>
+  <path class="edge" d="M580,430 L580,442 L715,442 L715,448" marker-end="url(#a)"/>
+</svg>
+<figcaption><b>wrench 匯流排。</b>新增一種控制行為只需要發一個 Wrench topic、並在
+<code>orca_params.yaml</code> 的 <code>input_topics</code> 加一行 —— 不用碰任何下游程式碼。</figcaption>
+</figure>
+
+<p>這是整個系統<b>最核心的設計決定</b>。多個來源也可以同時貢獻力，加總後自然疊加
+（例如深度定深 ＋ 自主前進）。</p>
+
+<div class="callout ok">
+  <div class="ct">為什麼每個來源要有獨立 timeout</div>
+  <p>每個來源有獨立的 <code>source_timeout_s</code>（預設 0.5 秒）：來源斷線或停止發布時，
+  該來源的貢獻<b>歸零</b>而不是保留最後一次的殘留力，避免載具在感測器斷線後仍被舊力推著跑。</p>
+</div>
+
+<!-- ══════════════════════════════ 3 ══════════════════════════════ -->
+<h2 id="s3"><span class="num">03</span>感測層 <code>sensors</code><a class="anchor" href="#s3">#</a></h2>
+
+<p>把韌體送來的原始訊號轉成控制層可以直接當回饋使用的格式。<b>這裡不做濾波，也不做感測器融合。</b></p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>節點</th><th>訂閱</th><th>發布</th><th>存在理由</th></tr></thead>
+<tbody>
+<tr><td><code>float32_to_float64_converter_node</code></td>
+    <td><code class="t">sensors/depth_m</code> (<code>Float32</code>)</td>
+    <td><code class="t">state/depth_m</code> (<code>Float64</code>)</td>
+    <td>型別不匹配：韌體送 <code>Float32</code>，PID 介面統一吃 <code>Float64</code>。
+        與其讓每個 PID 各自處理轉型，不如在感測邊界做一次</td></tr>
+<tr><td><code>imu_to_orientation_node</code></td>
+    <td><code class="t">sensors/imu</code> (<code>Imu</code>)</td>
+    <td><code class="t">state/orientation</code> (<code>Quaternion</code>)</td>
+    <td>只取姿態，丟掉角速度與加速度</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>這兩個節點原本放在 <code>depth_control</code> 裡，但它們與深度控制無關 —— 一個是通用型別轉換，
+一個是姿態。歸入感測層才符合它們實際的職責。</p>
+
+<!-- ══════════════════════════════ 4 ══════════════════════════════ -->
+<h2 id="s4"><span class="num">04</span>控制層 <code>control</code> / <code>depth_control</code><a class="anchor" href="#s4">#</a></h2>
+
+<h3 id="s4-1">4.1 通用 PID<a class="anchor" href="#s4-1">#</a></h3>
+
+<p>只有一份實作 <code>generic_pid_controller_node</code>（<code>LifecycleNode</code>），靠 launch 的 remap
+複用成具名實例。通用介面：</p>
+
+<div class="grid c2">
+<div class="tbl-wrap" style="margin:0">
+<table>
+<thead><tr><th>介面</th><th>型別</th></tr></thead>
+<tbody>
+<tr><td><code class="t">control/pid/reference</code>（訂）</td><td><code>Float64</code></td></tr>
+<tr><td><code class="t">control/pid/feedback</code>（訂）</td><td><code>Float64</code></td></tr>
+<tr><td><code class="t">control/pid/output</code>（發）</td><td><code>Float64</code></td></tr>
+<tr><td><code>{node_name}/reset</code>（service）</td><td><code>std_srvs/Trigger</code></td></tr>
+</tbody>
+</table>
+</div>
+<div class="tbl-wrap" style="margin:0">
+<table>
+<thead><tr><th>目前唯一實例</th><th>對應</th></tr></thead>
+<tbody>
+<tr><td>reference</td><td><code class="t">control/targets/depth_m</code></td></tr>
+<tr><td>feedback</td><td><code class="t">state/depth_m</code></td></tr>
+<tr><td>output</td><td><code class="t">control/pid/depth/sink_force_N</code></td></tr>
+<tr><td>node</td><td><code>depth_pid_controller_node</code></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="callout note">
+  <div class="ct">光流退場後</div>
+  <p>x / y / yaw 三軸的視覺伺服 PID 一併移入 <code>legacy/</code>。
+  yaw 目前是<b>全開迴路</b>（由 Autonomy 的 wrench 直接驅動）。若要補 yaw-hold，
+  複用同一份 <code>generic_pid_controller_node</code> 即可，但需先決定 yaw 的權威來源是
+  STM32 IMU 還是飛控 IMU。</p>
+</div>
+
+<div class="callout warn">
+  <div class="ct">增益每個控制迴圈重新讀取</div>
+  <p>所以 <code>ros2 param set</code> 立即生效。這是池邊調參的命脈，<b>不要為了效能改成快取</b>。</p>
+</div>
+
+<h4>積分抗飽和與輸出限幅</h4>
+<p><code>integral_limit</code> / <code>output_limit</code>（<code>&lt;= 0</code> 代表停用）：載具觸底、卡住或
+浮力沒配平時誤差會恆定不為零，積分項就無上界地線性成長。</p>
+
+<figure>
+<svg viewBox="0 0 900 260" role="img" aria-label="積分無上界成長的實測">
+  <path class="edge thin" d="M70,210 L790,210"/>
+  <path class="edge thin" d="M70,30 L70,210"/>
+  <text class="t3" x="790" y="228" text-anchor="end">時間（秒）</text>
+  <text class="t3" x="64" y="36" text-anchor="end">下沉力 (N)</text>
+  <text class="t3" x="64" y="213" text-anchor="end">0</text>
+  <text class="t3" x="70" y="228" text-anchor="middle">0</text>
+  <text class="t3" x="440" y="228" text-anchor="middle">45</text>
+
+  <path class="limit" d="M70,120 L790,120"/>
+  <text class="t3 l-danger" x="790" y="110" text-anchor="end">integral_limit / output_limit（若啟用）</text>
+
+  <path class="edge" d="M70,167 L432,71" stroke="var(--danger)" stroke-width="2.2" marker-end="url(#ax)"/>
+  <circle cx="70" cy="167" r="4" fill="var(--danger)"/>
+  <text class="t2 l-danger" x="76" y="186">32 N（起始）</text>
+  <text class="t2 l-danger" x="452" y="76">119 N ＠ 45 s，而且還在爬</text>
+
+  <path class="edge" d="M70,167 L300,120 L790,120" stroke="var(--control)" stroke-width="2.4"/>
+  <text class="t2 l-control" x="330" y="142">啟用 integral_limit 後：貼著上限收斂</text>
+  <text class="t3" x="70" y="248">模擬實測：目標深度設在池底以下，45 秒內積分項持續線性成長。此時就算把目標改淺，也要幾十秒讓積分吐完才會反應，中間會劇烈上浮超調。</text>
+</svg>
+<figcaption><b>積分無上界成長（模擬實測）。</b>
+<code>integral_limit</code> 限制的是積分項的<b>輸出貢獻</b>（單位與 <code>output_limit</code> 一致，都是牛頓），
+觸限時同步把內部累加值倒算回邊界。</figcaption>
+</figure>
+
+<h3 id="s4-2">4.2 深度力 → wrench<a class="anchor" href="#s4-2">#</a></h3>
+
+<p><code>output_sink_force_to_output_wrench_node</code> 把 PID 的純量輸出加上
+<code>depth_force_bias_N</code>（抵銷淨浮力的常數偏壓），組成 <code>Wrench</code> 發到
+<code class="t">control/wrench_sources/depth</code>。</p>
+
+<p><code>use_sink_force_direction</code> 開啟時會依 <code class="t">state/orientation</code> 把下沉力轉到
+載具座標系（載具傾斜時仍垂直向下）；關閉時直接當作 <code>+z</code>。<b>預設關閉。</b></p>
+
+<h3 id="s4-3">4.3 為什麼用 Lifecycle Node<a class="anchor" href="#s4-3">#</a></h3>
+
+<p><code>generic_pid_controller_node</code> 與 <code>wrench_sum_node</code> 繼承自 <code>LifecycleNode</code>：</p>
+
+<figure>
+<svg viewBox="0 0 900 190" role="img" aria-label="Lifecycle 狀態轉換">
+  <rect class="box b-neutral" x="40" y="46" width="190" height="56" rx="10"/>
+  <text class="t1 mono" x="135" y="68" text-anchor="middle" style="font-size:11.5px">unconfigured</text>
+  <text class="t3" x="135" y="87" text-anchor="middle">節點存在，未建資源</text>
+
+  <rect class="box b-decide" x="355" y="46" width="190" height="56" rx="10"/>
+  <text class="t1 mono" x="450" y="68" text-anchor="middle" style="font-size:11.5px">inactive</text>
+  <text class="t3" x="450" y="87" text-anchor="middle">可查詢，但不做事</text>
+
+  <rect class="box b-control" x="670" y="46" width="190" height="56" rx="10"/>
+  <text class="t1 mono" x="765" y="68" text-anchor="middle" style="font-size:11.5px">active</text>
+  <text class="t3" x="765" y="87" text-anchor="middle">累積積分項並輸出</text>
+
+  <path class="edge" d="M230,74 L349,74" marker-end="url(#a)"/>
+  <text class="t2 mono l-decide" x="290" y="64" text-anchor="middle">configure</text>
+  <path class="edge" d="M545,74 L664,74" marker-end="url(#ac)"/>
+  <text class="t2 mono l-control" x="605" y="64" text-anchor="middle">activate</text>
+
+  <path class="edge" d="M765,102 L765,146 L450,146 L450,108" marker-end="url(#a)"/>
+  <text class="t2 mono" x="607" y="160" text-anchor="middle">deactivate</text>
+
+  <text class="t3" x="40" y="176">PID 在 inactive 時不累積積分項、不輸出 —— 這是 supervisor 停用控制器的機制</text>
+</svg>
+<figcaption><b>Lifecycle 狀態轉換。</b>相較於在一般 Node 裡用自訂旗標，Lifecycle 的好處是
+狀態轉換是<b>標準化的 service 介面</b>，外部工具（<code>ros2 lifecycle</code>、本專案的
+<code>supervisor_node</code>）可以用同一套邏輯管理任何 lifecycle 節點，不用替每個節點寫特製啟停邏輯。</figcaption>
+</figure>
+
+<!-- ══════════════════════════════ 5 ══════════════════════════════ -->
+<h2 id="s5"><span class="num">05</span>致動層 <code>wrench_sum</code> / <code>thrusters</code><a class="anchor" href="#s5">#</a></h2>
+
+<h3 id="s5-1">5.1 加總<a class="anchor" href="#s5-1">#</a></h3>
+<p><code>wrench_sum_node</code>（Lifecycle）訂閱 <code>input_topics</code> 列出的所有來源，相加成單一
+<code class="t">control/wrench_command</code>。設定在 <code>orca_params.yaml</code>，<b>開機時讀取</b>
+（節點在建構時就要建立訂閱），改了要重啟。</p>
+
+<h3 id="s5-2">5.2 分配與飽和<a class="anchor" href="#s5-2">#</a></h3>
+
+<p><code>wrench_to_individual_thrusters_output_forces_node</code> 用推力分配矩陣（偽逆）把 6 維目標
+解算成 8 顆推進器各自的出力。幾何來自 <code>hardware.yaml</code>
+（<code>thruster_positions_m</code> / <code>thruster_directions</code>，每顆 3 個值展平成一維陣列，
+因為 ROS 2 參數不支援巢狀陣列）。</p>
+
+<figure>
+<svg viewBox="0 0 940 300" role="img" aria-label="saturation_mode：scale 與 clip 的差異">
+  <text class="t1 l-control" x="40" y="26">saturation_mode: scale（預設）</text>
+  <text class="t3" x="40" y="44">任一顆超限時全部等比例縮放 —— 保留指令方向，載具只是變慢</text>
+  <text class="t1 l-danger" x="520" y="26">saturation_mode: clip</text>
+  <text class="t3" x="520" y="44">各自獨立截斷 —— 扭曲合力方向，載具往非預期方向偏</text>
+
+  <!-- left chart -->
+  <path class="edge thin" d="M40,175 L440,175"/>
+  <path class="limit" d="M40,127 L440,127"/>
+  <path class="limit" d="M40,223 L440,223"/>
+  <text class="t3 l-danger" x="446" y="127" dominant-baseline="middle">＋上限</text>
+  <text class="t3 l-danger" x="446" y="223" dominant-baseline="middle">－上限</text>
+
+  <rect class="bar-req" x="52"  y="139" width="30" height="36"/>
+  <rect class="bar-ok"  x="52"  y="151" width="30" height="24"/>
+  <rect class="bar-req" x="100" y="175" width="30" height="54"/>
+  <rect class="bar-ok"  x="100" y="175" width="30" height="36"/>
+  <rect class="bar-req" x="148" y="103" width="30" height="72"/>
+  <rect class="bar-ok"  x="148" y="127" width="30" height="48"/>
+  <rect class="bar-req" x="196" y="151" width="30" height="24"/>
+  <rect class="bar-ok"  x="196" y="159" width="30" height="16"/>
+  <rect class="bar-req" x="244" y="175" width="30" height="66"/>
+  <rect class="bar-ok"  x="244" y="175" width="30" height="44"/>
+  <rect class="bar-req" x="292" y="133" width="30" height="42"/>
+  <rect class="bar-ok"  x="292" y="147" width="30" height="28"/>
+  <rect class="bar-req" x="340" y="157" width="30" height="18"/>
+  <rect class="bar-ok"  x="340" y="163" width="30" height="12"/>
+  <rect class="bar-req" x="388" y="175" width="30" height="30"/>
+  <rect class="bar-ok"  x="388" y="175" width="30" height="20"/>
+  <text class="t3" x="40" y="262">全部 × 0.67 · 方向不變</text>
+
+  <!-- right chart -->
+  <path class="edge thin" d="M520,175 L900,175"/>
+  <path class="limit" d="M520,127 L900,127"/>
+  <path class="limit" d="M520,223 L900,223"/>
+
+  <rect class="bar-req" x="532" y="139" width="30" height="36"/>
+  <rect class="bar-ok"  x="532" y="139" width="30" height="36"/>
+  <rect class="bar-req" x="578" y="175" width="30" height="54"/>
+  <rect class="bar-bad" x="578" y="175" width="30" height="48"/>
+  <rect class="bar-req" x="624" y="103" width="30" height="72"/>
+  <rect class="bar-bad" x="624" y="127" width="30" height="48"/>
+  <rect class="bar-req" x="670" y="151" width="30" height="24"/>
+  <rect class="bar-ok"  x="670" y="151" width="30" height="24"/>
+  <rect class="bar-req" x="716" y="175" width="30" height="66"/>
+  <rect class="bar-bad" x="716" y="175" width="30" height="48"/>
+  <rect class="bar-req" x="762" y="133" width="30" height="42"/>
+  <rect class="bar-ok"  x="762" y="133" width="30" height="42"/>
+  <rect class="bar-req" x="808" y="157" width="30" height="18"/>
+  <rect class="bar-ok"  x="808" y="157" width="30" height="18"/>
+  <rect class="bar-req" x="854" y="175" width="30" height="30"/>
+  <rect class="bar-ok"  x="854" y="175" width="30" height="30"/>
+  <text class="t3 l-danger" x="520" y="262">只有 3 顆被截斷 · 其餘不變 → 合力方向偏移</text>
+
+  <text class="t3" x="40" y="284">虛線框＝分配矩陣算出的需求出力，實心＝實際送出的出力。八根 bar 對應 thruster_0..7。</text>
+</svg>
+<figcaption><b>兩種飽和模式的差別（示意）。</b>
+<code>scale</code> 保留指令方向；<code>clip</code> 會扭曲合力方向。</figcaption>
+</figure>
+
+<div class="callout ok">
+  <div class="ct">飽和限幅為什麼放在這裡，而不是只在力→PWM 節點</div>
+  <p>模擬路徑<b>刻意跳過</b> PWM 轉換節點。限幅若只寫在那裡，模擬就完全沒有飽和行為，
+  調出來的增益搬到實機會對不上。放在兩條路徑的共同節點上，模擬與實機才有同一組飽和行為。</p>
+</div>
+
+<h3 id="s5-3">5.3 力 → PWM（僅實機）<a class="anchor" href="#s5-3">#</a></h3>
+
+<p><code>thruster_force_to_pwm_output_signal_node</code> 查推進器廠商的力-PWM 對照曲線
+（<code>thruster_lookup_table_16V.csv</code>）擬合出脈寬，發到 <code class="t">thrusters/pwm_us</code>。
+自己也有一道 clamp，作為最後防線。</p>
+
+<div class="callout note">
+  <div class="ct">thruster_initialization_node 存在的原因</div>
+  <p>ESC 開機時需要先持續收到<b>中位 PWM</b> 一段時間才會完成解鎖（arming）。它鎖住
+  <code class="t">thrusters/initializing</code>，讓下游暫時只輸出中位訊號，直到初始化序列跑完。</p>
+</div>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Topic / Service</th><th>型別</th><th>發布</th><th>訂閱</th></tr></thead>
+<tbody>
+<tr><td><code class="t">control/wrench_sources/{gui,depth,decision}</code></td><td><code>Wrench</code></td><td>各控制來源</td><td><code>wrench_sum_node</code></td></tr>
+<tr><td><code class="t">control/wrench_command</code></td><td><code>Wrench</code></td><td><code>wrench_sum_node</code></td><td>分配節點</td></tr>
+<tr><td><code class="t">thrusters/thruster_{0..7}/force_N</code></td><td><code>Float64</code></td><td>分配節點</td><td>力→PWM 節點 / <code>ros_gz_bridge</code></td></tr>
+<tr><td><code class="t">thrusters/pwm_us</code></td><td><code>Int32MultiArray</code></td><td>力→PWM 節點、初始化節點</td><td>STM32</td></tr>
+<tr><td><code class="t">thrusters/initializing</code></td><td><code>Bool</code></td><td>初始化節點</td><td>力→PWM 節點</td></tr>
+<tr><td><code class="t">thrusters/set_enabled</code></td><td><code>Bool</code></td><td>初始化節點</td><td>STM32</td></tr>
+<tr><td><code class="t">thrusters/enabled</code></td><td><code>Bool</code></td><td>STM32</td><td><code>supervisor_node</code></td></tr>
+<tr><td><code class="t">thrusters/initialize_all</code></td><td><code>std_srvs/Trigger</code></td><td>service：初始化節點</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ══════════════════════════════ 6 ══════════════════════════════ -->
+<h2 id="s6"><span class="num">06</span>系統管理 <code>system_manager</code><a class="anchor" href="#s6">#</a></h2>
+
+<p><code>supervisor_node</code> 是整個系統<b>唯一</b>決定「現在該讓哪些控制器運作」的地方。
+它把安全前提跟控制器邏輯完全切開：PID 控制器完全不知道 kill switch 存在，只回應標準的
+lifecycle 轉換；supervisor 才是決定「現在允許哪些節點進入 active」的角色。
+好處是新增一種安全條件只需要改 supervisor 一處。</p>
+
+<h3 id="s6-1">6.1 控制模式<a class="anchor" href="#s6-1">#</a></h3>
+
+<pre><code>class ControlMode(Enum):
+    SAFE_DISABLED
+    MANUAL
+    DEPTH_HOLD
+    AUTONOMOUS
+    AUTONOMOUS_AND_DEPTH_HOLD
+    FAULT</code></pre>
+
+<div class="tbl-wrap">
+<table class="matrix">
+<thead><tr><th>模式</th><th><code>wrench_sum</code></th><th>深度 PID</th><th>放行的 wrench 來源</th></tr></thead>
+<tbody>
+<tr><td><code>SAFE_DISABLED</code></td><td class="no">✕</td><td class="no">✕</td><td>—</td></tr>
+<tr><td><code>MANUAL</code></td><td class="yes">✓</td><td class="no">✕</td><td><code>…/gui</code></td></tr>
+<tr><td><code>DEPTH_HOLD</code></td><td class="yes">✓</td><td class="yes">✓</td><td><code>…/depth</code></td></tr>
+<tr><td><code>AUTONOMOUS</code></td><td class="yes">✓</td><td class="no">✕</td><td><code>…/decision</code></td></tr>
+<tr><td><code>AUTONOMOUS_AND_DEPTH_HOLD</code></td><td class="yes">✓</td><td class="yes">✓</td><td><code>…/decision</code> ＋ <code>…/depth</code></td></tr>
+<tr><td><code>FAULT</code></td><td class="no">✕</td><td class="no">✕</td><td>—（安全前提被打破後自動進入）</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><code>AUTONOMOUS</code> 放行的是 Autonomy 堆疊直接發到 wrench 匯流排的
+<code class="t">control/wrench_sources/decision</code>。它<b>沒有自己的 lifecycle 節點</b> ——
+只需要 <code>wrench_sum_node</code> 是 active，外加「決策來源還活著」這個安全前提。
+<code>AUTONOMOUS</code> 與 <code>DEPTH_HOLD</code> 可以疊加。</p>
+
+<div class="callout note">
+  <div class="ct">在有 AUTONOMOUS 模式之前</div>
+  <p>要讓決策層的指令到得了推進器，只能先進 <code>MANUAL</code>（語意矛盾，而且會關掉深度 PID）
+  或 <code>DEPTH_HOLD</code>（順帶啟用深度 PID），而且沒有任何機制確認決策來源還活著 ——
+  Autonomy 掛掉時，<code>wrench_sum</code> 只會靜默把該來源歸零，載具停住但沒有人知道為什麼。</p>
+</div>
+
+<h3 id="s6-2">6.2 安全檢查<a class="anchor" href="#s6-2">#</a></h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>前提</th><th>參數</th><th>適用模式</th></tr></thead>
+<tbody>
+<tr><td>kill switch 未觸發</td><td><code>require_not_killed</code></td><td>全部</td></tr>
+<tr><td>推進器已啟用</td><td><code>require_thrusters_enabled</code></td><td>全部</td></tr>
+<tr><td>深度資料未逾時</td><td><code>depth_sensor_timeout_s</code></td><td><code>DEPTH_HOLD</code></td></tr>
+<tr><td>decision wrench 未逾時</td><td><code>decision_timeout_s</code></td><td><code>AUTONOMOUS</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout danger">
+  <div class="ct">FAULT 是自動的，不需要外部呼叫任何 service</div>
+  <p>一個 <b>0.2 秒</b>週期的 timer 持續重新檢查目前 active 模式的安全條件。任一前提被打破
+  就立刻把所有 controller lifecycle disable、停掉 <code>wrench_sum</code>、進入 <code>FAULT</code>。
+  另一個同週期 timer 把模式／狀態文字廣播到 <code class="t">system_manager/mode</code> 與
+  <code class="t">system_manager/status</code>。</p>
+</div>
+
+<h3 id="s6-3">6.3 介面<a class="anchor" href="#s6-3">#</a></h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>Interface</th><th>型別</th><th>說明</th></tr></thead>
+<tbody>
+<tr><td><code class="t">system_manager/mode</code></td><td><code>String</code>（發布）</td><td>目前 <code>ControlMode</code>，0.2 s 廣播</td></tr>
+<tr><td><code class="t">system_manager/status</code></td><td><code>String</code>（發布）</td><td>人類可讀狀態／FAULT 原因</td></tr>
+<tr><td><code>system_manager/set_mode/{safe_disabled,manual,depth_hold,autonomous}</code></td><td><code>Trigger</code></td><td>切模式</td></tr>
+<tr><td><code>system_manager/disable/{depth_hold,autonomous}</code></td><td><code>Trigger</code></td><td>停用單一群組</td></tr>
+<tr><td><code>system_manager/reset_controllers</code></td><td><code>Trigger</code></td><td>廣播 reset（歸零積分項等）</td></tr>
+<tr><td><code class="t">sensors/killed</code></td><td><code>Bool</code>（訂閱）</td><td>kill switch，來自 STM32</td></tr>
+<tr><td><code>/flash_stm32</code></td><td><code>Trigger</code></td><td>韌體燒錄（<code>stm32_manager</code> 提供，開機可自動）</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ══════════════════════════════ 7 ══════════════════════════════ -->
+<h2 id="s7"><span class="num">07</span>操作介面 <code>gui</code><a class="anchor" href="#s7">#</a></h2>
+
+<p><code>gui_node</code> 是 ROS 2 ↔ WebSocket 的橋接器，讓操作者不需要另外裝 ROS 2 環境就能監控與操作載具。</p>
+
+<div class="grid c2">
+  <div class="card"><span class="tag control">發布</span>
+    <p><code class="t">control/wrench_sources/gui</code>（手動 wrench）、<code class="t">control/targets/depth_m</code></p></div>
+  <div class="card"><span class="tag sense">訂閱</span>
+    <p><code>system_manager/mode</code>、<code>/status</code>、<code>state/depth_m</code>、
+       <code>thrusters/*</code> 轉發前端</p></div>
+  <div class="card"><span class="tag decide">參數</span>
+    <p>透過 <code>rcl_interfaces</code> Get/SetParameters 即時調深度 PID 增益（池邊調參）</p></div>
+  <div class="card"><span class="tag danger">Service</span>
+    <p>呼叫 supervisor 的模式切換 service、推進器初始化、STM32 燒錄</p></div>
+</div>
+
+<p>影像串流由獨立的 <code>web_video_server</code> 提供 MJPEG，<b>不走 WebSocket</b>。
+底部相機退場後，串流來源預設指向 Autonomy 堆疊的 RealSense。</p>
+
+<!-- ══════════════════════════════ 8 ══════════════════════════════ -->
+<h2 id="s8"><span class="num">08</span>啟動與設定 <code>orca_bringup</code><a class="anchor" href="#s8">#</a></h2>
+
+<p>所有 launch 與設定的<b>唯一來源</b>。</p>
+
+<div class="tree">
+orca_bringup/<br>
+├── launch/<br>
+│&nbsp;&nbsp; ├── <span class="k">bringup.launch.py</span>&nbsp;&nbsp;&nbsp; <span class="c"># 唯一入口，sim:=true 切模擬</span><br>
+│&nbsp;&nbsp; └── record.launch.py&nbsp;&nbsp;&nbsp;&nbsp; <span class="c"># bag 錄製</span><br>
+└── config/<br>
+&nbsp;&nbsp;&nbsp; ├── <span class="k">orca_params.yaml</span>&nbsp;&nbsp;&nbsp;&nbsp; <span class="c"># 控制參數（池邊調參動這份）</span><br>
+&nbsp;&nbsp;&nbsp; ├── hardware.yaml&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="c"># 推進器幾何、出力上限、ESC 時序</span><br>
+&nbsp;&nbsp;&nbsp; ├── sim_overrides.yaml&nbsp;&nbsp; <span class="c"># 模擬疊加值</span><br>
+&nbsp;&nbsp;&nbsp; └── record_topics.yaml&nbsp;&nbsp; <span class="c"># bag 錄製清單</span>
+</div>
+
+<p>實機與模擬<b>共用同一個 launch 檔</b>，差異只有兩處：<code>sim=true</code> 時跳過硬體專屬節點
+（micro-ROS agent、STM32 燒錄、ESC 初始化、力→PWM），並額外疊上 <code>sim_overrides.yaml</code>。</p>
+
+<div class="callout note">
+  <div class="ct">為什麼刻意共用</div>
+  <p>舊架構是實機／模擬各一份 launch 檔，兩邊已經開始各自漂移
+  （<code>wrench_sum</code> 的來源清單就已經不一致）。</p>
+</div>
+
+<h3 id="s8-ns">參數的 namespace 陷阱<a class="anchor" href="#s8-ns">#</a></h3>
+
+<p>params YAML 的 key 必須是<b>含 namespace 的完整節點名</b>。本專案的 namespace 是 launch 參數，
+所以一律用萬用字元：</p>
+
+<pre><code>/**/depth_pid_controller_node:
+  ros__parameters:
+    proportional_gain: 40.0</code></pre>
+
+<div class="callout danger">
+  <div class="ct">寫錯不會報錯</div>
+  <p>只會靜默回落到節點內建預設值（<b>PID 增益直接變 0</b>）。改完務必用
+  <code>make dump_params</code> 確認實際生效的值。</p>
+</div>
+
+<h3 id="s8-params">兩類參數<a class="anchor" href="#s8-params">#</a></h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>類別</th><th>行為</th><th>例子</th></tr></thead>
+<tbody>
+<tr><td><span class="tag control">熱調</span></td>
+    <td>每個控制迴圈重新讀取，<code>ros2 param set</code> 立即生效</td>
+    <td>PID 四個增益、<code>integral_limit</code>、<code>output_limit</code>、<code>depth_force_bias_N</code></td></tr>
+<tr><td><span class="tag neutral">開機讀</span></td>
+    <td>建構時讀一次，改了要重啟</td>
+    <td><code>controller_loop_timer_period_s</code>、<code>wrench_sum</code> 的 <code>input_topics</code> /
+        <code>publish_rate</code> / <code>source_timeout_s</code>、推進器幾何</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ══════════════════════════════ 9 ══════════════════════════════ -->
+<h2 id="s9"><span class="num">09</span>外部邊界<a class="anchor" href="#s9">#</a></h2>
+
+<h3 id="s9-1">9.1 STM32 韌體（<code>SAUVC-STM32</code> submodule）<a class="anchor" href="#s9-1">#</a></h3>
+
+<p>透過 <code>micro_ros_agent</code>（serial transport）接進同一個 ROS 2 graph。
+序列埠路徑來自 <code>.env</code> 的 <code>ORCA_STM32_PORT</code>。</p>
+
+<div class="callout warn">
+  <div class="ct">建議用 /dev/serial/by-id/ 穩定路徑</div>
+  <p><code>/dev/ttyUSB*</code> 的編號會隨插拔順序改變。</p>
+</div>
+
+<div class="grid c2">
+  <div class="card"><span class="tag sense">韌體 → 本 repo</span>
+    <p><code>sensors/depth_m</code> (<code>Float32</code>)、<code>sensors/imu</code> (<code>Imu</code>)、
+       <code>sensors/killed</code> (<code>Bool</code>)、<code>thrusters/enabled</code> (<code>Bool</code>)</p></div>
+  <div class="card"><span class="tag control">本 repo → 韌體</span>
+    <p><code>thrusters/pwm_us</code> (<code>Int32MultiArray</code>)、
+       <code>thrusters/set_enabled</code> (<code>Bool</code>)</p></div>
+</div>
+
+<h3 id="s9-2">9.2 模擬（<code>SAUVC-Simulation</code> submodule）<a class="anchor" href="#s9-2">#</a></h3>
+
+<p>Gazebo Fortress + <code>ros_gz_bridge</code>。模擬時分配層只到「每顆推進器的力」為止，
+<code class="t">thrusters/thruster_{0..7}/force_N</code> 直接進 bridge。
+深度來自 Gazebo altimeter 經 <code>altimeter_to_pressure_sensor_node</code> 轉成
+<code class="t">sensors/depth_m</code>。</p>
+
+<div class="callout danger">
+  <div class="ct">模擬的深度零點是載具出生位置，不是水面</div>
+  <p>Gazebo altimeter 的 <code>vertical_position</code> 是相對出生點的；實機壓力計的零點是水面。
+  模擬調出來的 <code>depth_force_bias_N</code> 與絕對深度目標<b>不能直接搬到實機</b>。</p>
+</div>
+
+<!-- ══════════════════════════════ 10 ══════════════════════════════ -->
+<h2 id="s10"><span class="num">10</span>已知問題<a class="anchor" href="#s10">#</a></h2>
+
+<p>以下是已確認、但<b>不在本 repo 修</b>的跨 repo 落差，記錄備查
+（完整分析見 <a href="../../docs/SIMULATION_FINDINGS.md">SIMULATION_FINDINGS.md</a>）：</p>
+
+<div class="issue">
+  <div class="n">1</div>
+  <div class="body">
+    <p><b>單位落差。</b>Autonomy 的 <code>decision_params.yaml</code> 與程式碼預設差 <b>100 倍</b>
+    （<code>move_above_max_surge</code> YAML 15.0 vs 程式碼 0.15），這些值乘上 <code>k_surge</code> 後
+    <b>直接當牛頓</b>進本 repo 的分配矩陣。實際後果：<code>BumpFlare</code> 約 20 N（合理），
+    <code>GoToPose</code> 約 0.24 N（等於不動）。</p>
+  </div>
+</div>
+<div class="issue">
+  <div class="n">2</div>
+  <div class="body">
+    <p><b><code>heave</code> 無增益。</b>Autonomy 的 <code>wrench_adapter.cpp</code> 中
+    <code>force.z = heave</code> 是唯一沒乘係數的軸。目前所有 BT 節點都未設定 heave 故恆為 0；
+    一旦有人設定，它會直接對抗深度 PID，且兩者在 wrench 匯流排上<b>靜默相加</b>。</p>
+  </div>
+</div>
+<div class="issue">
+  <div class="n">3</div>
+  <div class="body">
+    <p><b>機械臂通道斷開。</b>Autonomy 發布 <code>/orca/decision/arm</code> (<code>Int32</code>) 與
+    <code>/orca/decision/hand</code> (<code>Bool</code>)，本 repo 沒有任何訂閱者，
+    用的是完全不同的 <code>actuators/electromagnet/enabled</code>。</p>
+  </div>
+</div>
+<div class="issue">
+  <div class="n">4</div>
+  <div class="body">
+    <p><b>無回饋回 Autonomy。</b>Autonomy 設定 desired_depth 但從不知道實際深度。</p>
+  </div>
+</div>
+<div class="issue">
+  <div class="n">5</div>
+  <div class="body">
+    <p><b>兩個獨立的 IMU 來源。</b>Autonomy 訂閱飛控 IMU（<code>/orca/imu/data</code>），
+    本 repo 用 STM32 IMU（<code>sensors/imu</code>）。同一台載具上兩個 IMU 各餵各的消費者，
+    彼此不知道對方存在。要補 yaw-hold 之前必須先決定權威來源。</p>
+  </div>
+</div>
+<div class="issue fixed">
+  <div class="n">✓</div>
+  <div class="body">
+    <p><del><b>namespace 硬編碼。</b></del> <span class="tag control">已修</span>
+    Autonomy 的 <code>decision.launch.py</code> 改由 <code>namespace</code> 參數推導 remap，
+    <code>perception.launch.py</code> 展開 YAML 裡的 <code>$(ns)</code>，
+    兩者的預設值都讀 <code>ORCA_NAMESPACE</code>。兩個 repo 現在都是參數化的。</p>
+  </div>
+</div>
+<div class="issue">
+  <div class="n">7</div>
+  <div class="body">
+    <p><b><code>wrench_sum</code> 的 <code>publish_rate</code> 名不副實。</b>
+    <code>listener_callback</code> 收到任何來源就直接發布一次，同時 timer 也在發，
+    實際輸出率是「timer 頻率 ＋ 所有輸入頻率總和」。設 30 Hz 實測約 <b>130 Hz</b>。</p>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var root = document.documentElement, KEY = 'sauvc-doc-theme';
+  var saved = null;
+  try { saved = localStorage.getItem(KEY); } catch(e){}
+  if (saved) root.setAttribute('data-theme', saved);
+  document.getElementById('theme').addEventListener('click', function(){
+    var cur = root.getAttribute('data-theme');
+    var sysDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var next = cur ? (cur === 'dark' ? 'light' : 'dark') : (sysDark ? 'light' : 'dark');
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem(KEY, next); } catch(e){}
+  });
+
+  var sb = document.getElementById('sidebar'), tg = document.getElementById('navtoggle');
+  tg.addEventListener('click', function(){ sb.classList.toggle('open'); });
+  sb.addEventListener('click', function(e){ if (e.target.tagName === 'A') sb.classList.remove('open'); });
+
+  var links = [].slice.call(document.querySelectorAll('#toc a'));
+  var map = {};
+  links.forEach(function(a){ map[a.getAttribute('href').slice(1)] = a; });
+  var targets = Object.keys(map).map(function(id){ return document.getElementById(id); }).filter(Boolean);
+  var visible = new Set();
+  function paint(){
+    var best = null;
+    targets.forEach(function(t){ if (visible.has(t.id) && !best) best = t.id; });
+    if (!best) {
+      for (var i = targets.length - 1; i >= 0; i--) {
+        if (targets[i].getBoundingClientRect().top < 120) { best = targets[i].id; break; }
+      }
+    }
+    links.forEach(function(a){ a.classList.remove('active'); });
+    if (best && map[best]) map[best].classList.add('active');
+  }
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if (en.isIntersecting) visible.add(en.target.id); else visible.delete(en.target.id);
+    });
+    paint();
+  }, { rootMargin: '-70px 0px -70% 0px' });
+  targets.forEach(function(t){ io.observe(t); });
+  window.addEventListener('scroll', function(){ if (!visible.size) paint(); }, { passive: true });
+  paint();
+
+  document.addEventListener('click', function(e){
+    var el = e.target.closest && e.target.closest('code.t');
+    if (!el) return;
+    var txt = el.textContent;
+    var done = function(){
+      el.classList.add('copied');
+      setTimeout(function(){ el.classList.remove('copied'); }, 1100);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done, function(){});
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch(err){}
+      document.body.removeChild(ta);
+    }
+  });
+})();
+</script>
+</body>
+</html>

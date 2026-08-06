@@ -39,7 +39,7 @@
 核心設計是 **wrench 匯流排**：所有「想讓載具動」的來源（深度 PID、GUI 手動、
 Autonomy 決策）都只做一件事 —— 發布一個 `geometry_msgs/Wrench` 到自己專屬的
 `control/wrench_sources/*`。新增控制行為只要多發一個 topic 並在設定裡加一行，
-不用碰任何下游程式碼。細節見 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+不用碰任何下游程式碼。細節見 [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html)。
 
 ## 取得
 
@@ -188,7 +188,7 @@ rpi_ros2_ws/src/
 
 ## 相關文件
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 系統怎麼運作
+- [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) —— 系統怎麼運作
 - [../docs/HANDOFF.md](../docs/HANDOFF.md) —— 座標慣例、已知缺陷、驗收方式
 - [../README.md](../README.md) —— super-repo：一次啟動整套系統
 - [../docs/REFACTOR_PLAN.md](../docs/REFACTOR_PLAN.md) —— 重構計畫與決策紀錄
