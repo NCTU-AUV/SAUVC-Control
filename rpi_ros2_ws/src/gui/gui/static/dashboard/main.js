@@ -178,9 +178,14 @@ $("kb_depth_step_input").addEventListener("change", (e) => {
 
 // -------------------------------------------------------------------- camera
 
+// The topic goes in raw. web_video_server does not URL-decode the query
+// parameter, so percent-encoding the slashes makes it reject the request with
+// "Invalid topic name" and return an empty multipart body — a stream that
+// connects and then shows nothing. Topic names only ever contain slashes,
+// alphanumerics and underscores, all of which are safe here unescaped.
 function streamUrl(topic) {
     return `http://${window.location.hostname}:${state.cameraPort}`
-        + `/stream?topic=${encodeURIComponent(topic)}`;
+        + `/stream?topic=${topic}`;
 }
 
 // Availability comes from the backend, which checks the ROS graph. The browser
