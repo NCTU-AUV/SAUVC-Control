@@ -43,6 +43,16 @@ Autonomy 決策）都只做一件事 —— 發布一個 `geometry_msgs/Wrench` 
 
 ## 取得
 
+**平常不用直接開這個 repo。** 從 [super-repo](https://github.com/NCTU-AUV/SAUVC)
+一個指令就會把這個堆疊連同感知決策與模擬一起拉起來：
+
+```shell
+cd ../          # SAUVC super-repo
+make up && make build && make launch
+```
+
+底下是單獨開發本 repo 時用的流程。
+
 ```shell
 git clone https://github.com/NCTU-AUV/SAUVC-RPI.git
 cd SAUVC-RPI
@@ -141,6 +151,10 @@ ros2 service call /orca_auv/system_manager/set_mode/safe_disabled std_srvs/srv/T
 任何一個安全前提被打破 —— kill switch 觸發、深度感測器逾時、
 Autonomy 的 decision wrench 逾時 —— 都會立刻進 `FAULT` 並停掉所有輸出。
 
+**FAULT 是鎖存狀態。** 在 FAULT 中呼叫 `depth_hold` 或 `autonomous` 會被回絕
+（`success=False`，訊息帶著故障原因），控制器狀態完全不會被改動。
+要恢復必須先明確地經 `safe_disabled` 或 `manual` 清除 FAULT，這是唯一的出口。
+
 ## Bag 錄製
 
 隨啟動自動開始錄（比賽時沒有人會記得按錄影），要關就 `record:=false`。
@@ -175,5 +189,7 @@ rpi_ros2_ws/src/
 ## 相關文件
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 系統怎麼運作
+- [../docs/HANDOFF.md](../docs/HANDOFF.md) —— 座標慣例、已知缺陷、驗收方式
+- [../README.md](../README.md) —— super-repo：一次啟動整套系統
 - [../docs/REFACTOR_PLAN.md](../docs/REFACTOR_PLAN.md) —— 重構計畫與決策紀錄
 - [../docs/SIMULATION_FINDINGS.md](../docs/SIMULATION_FINDINGS.md) —— 三容器全鏈路實測報告
