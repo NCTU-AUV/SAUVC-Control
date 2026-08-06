@@ -152,16 +152,18 @@ function depthHoldActive() {
         || state.mode === protocol.modes.autonomousAndDepthHold;
 }
 
+// Keys are live in the two modes where the operator is the one flying.
+// wrench_sum has no per-mode source filter — a single global active flag — so
+// the GUI wrench really is summed in DEPTH_HOLD too, verified on the running
+// stack: force.x 20 arrived at control/wrench_command next to the PID's
+// force.z. Deliberately not enabled in the autonomous modes, where piloting
+// would silently fight the decision node on the same bus.
+function pilotingAllowed() {
+    return state.mode === protocol.modes.manual || depthHoldActive();
+}
+
 const pilot = new window.KeyboardPilot(socket, protocol, {
-    getEnabled: () => state.mode === protocol.modes.manual,
-    // Q/E cannot always mean the same thing. MANUAL deactivates the depth PID,
-    // so a setpoint there would go to a controller that is not running; depth
-    // hold has the PID flying the vehicle, so raw force would fight it.
-    getVerticalMode: () => {
-        if (state.mode === protocol.modes.manual) return "force";
-        if (depthHoldActive()) return "setpoint";
-        return "none";
-    },
+    getEnabled: pilotingAllowed,
     getTargetDepth: () => state.targetDepth,
     onState: (s) => {
         document.querySelectorAll(".key").forEach((el) => {
@@ -174,22 +176,28 @@ pilot.start();
 function updateKeyboardAvailability() {
     const manual = state.mode === protocol.modes.manual;
     const holding = depthHoldActive();
-    const active = manual || holding;
+    const active = pilotingAllowed();
     setPill("keyboard_pill", active ? "active" : "inactive", active ? "ok" : "");
 
-    if (manual) {
+    if (holding) {
         $("keyboard_hint").textContent =
-            "Manual: all keys drive thrust directly. Q/E is vertical force — "
-            + "the depth PID is off in this mode.";
-    } else if (holding) {
+            "WASD steers, Q/E moves the depth target and the PID flies to it.";
+        $("keyboard_hint").className = "hint";
+    } else if (manual) {
+        // Worth saying plainly: MANUAL is the one mode that deactivates the
+        // depth PID, so the setpoint Q/E writes has nothing acting on it.
         $("keyboard_hint").textContent =
-            "Depth hold: Q/E moves the depth setpoint. WASD needs Manual.";
+            "WASD steers. Q/E still moves the depth target, but Manual "
+            + "deactivates the depth PID so nothing acts on it — switch to "
+            + "Depth hold to actually change depth.";
+        $("keyboard_hint").className = "hint warn";
     } else {
         $("keyboard_hint").textContent =
-            "Enable Manual (thrust) or Depth hold (setpoint) to use the keyboard.";
+            "Enable Depth hold (or Manual) to pilot from the keyboard.";
+        $("keyboard_hint").className = "hint";
     }
-    $("kb_vertical_note").textContent = manual
-        ? "vertical force" : holding ? "depth setpoint" : "unavailable";
+    $("kb_vertical_note").textContent = holding
+        ? "depth target" : manual ? "depth target (PID off)" : "unavailable";
 }
 
 $("kb_force_input").addEventListener("change", (e) => {
@@ -200,9 +208,6 @@ $("kb_torque_input").addEventListener("change", (e) => {
 });
 $("kb_depth_step_input").addEventListener("change", (e) => {
     pilot.depthStepM = Number(e.target.value) || 0;
-});
-$("kb_heave_input").addEventListener("change", (e) => {
-    pilot.heaveForceN = Number(e.target.value) || 0;
 });
 
 // -------------------------------------------------------------------- camera

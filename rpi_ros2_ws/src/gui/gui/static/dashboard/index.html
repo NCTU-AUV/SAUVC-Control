@@ -93,7 +93,7 @@
                 <input type="number" step="0.05" min="0" id="target_depth_input" aria-label="Target depth in metres">
                 <button id="button_set_depth">Set</button>
             </div>
-            <div class="hint">Q / E move this while Depth hold is on. In Manual they push vertical force instead &mdash; the PID is off there.</div>
+                        <div class="hint">Q / E step this by the amount set in Tuning. Depth hold must be on for the PID to fly to it.</div>
         </div>
 
         <!-- ---- mission ---- -->
@@ -207,13 +207,9 @@
                 <input type="number" step="1" min="0" id="kb_torque_input" value="10"></label>
             <label class="field"><span class="label">Depth step (m)</span>
                 <input type="number" step="0.01" min="0" id="kb_depth_step_input" value="0.05"></label>
-            <label class="field"><span class="label">Vertical force (N)</span>
-                <input type="number" step="1" min="0" id="kb_heave_input" value="15"></label>
         </div>
         <div class="hint">
-            Applies immediately. Down is positive, so E goes deeper. Q/E uses the
-            force in Manual and the step in Depth hold &mdash; the depth PID only
-            runs in the latter.
+            Applies immediately. Down is positive, so E goes deeper.
         </div>
     </div>
 
