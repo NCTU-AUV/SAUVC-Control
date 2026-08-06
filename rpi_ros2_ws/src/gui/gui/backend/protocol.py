@@ -33,6 +33,7 @@ ACTION_SAFE_DISABLE = "safe_disable"
 # Mission start lives in the autonomy stack. The two containers share one ROS
 # graph, so publishing it from here works and saves the operator a shell.
 ACTION_START_MISSION = "start_mission"
+ACTION_STOP_MISSION = "stop_mission"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
 
@@ -48,6 +49,14 @@ SUPERVISOR_SERVICE_DISABLE_AUTONOMOUS = "disable_autonomous"
 SUPERVISOR_SERVICE_RESET_CONTROLLERS = "reset_controllers"
 SUPERVISOR_SERVICE_SAFE_DISABLED = "safe_disabled"
 SUPERVISOR_SERVICE_MANUAL = "manual"
+
+# Modes in which the BehaviorTree is allowed to be flying the vehicle. Leaving
+# this set has to stop the mission: the supervisor only gates the wrench bus in
+# the control stack, so without an explicit stop the tree keeps ticking in the
+# other container — still counting down its timeouts, still overwriting the
+# depth target through SetDepth, and resuming mid-mission the moment somebody
+# re-arms.
+AUTONOMOUS_MODES = ("AUTONOMOUS", "AUTONOMOUS_AND_DEPTH_HOLD")
 
 # --- vehicle topics relayed to the browser ---------------------------------
 TOPIC_KILLED = "sensors/killed"

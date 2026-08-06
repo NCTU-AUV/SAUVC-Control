@@ -449,16 +449,22 @@ toggleHandler("toggle_autonomous", protocol.actions.setSupervisorAutonomousMode)
 toggleHandler("toggle_manual", protocol.actions.setSupervisorManualMode);
 toggleHandler("toggle_simulation", protocol.actions.setSupervisorSimulationMode);
 
-$("estop_button").addEventListener("click", () => {
+// Stop the tree as well as the bus. gui_node also does this off the mode
+// topic, but sending it here means the mission stops on the same click rather
+// than one supervisor round-trip later.
+function emergencyStop() {
+    socket.sendAction(protocol.actions.stopMission);
     socket.sendAction(protocol.actions.safeDisable);
-});
+}
+
+$("estop_button").addEventListener("click", emergencyStop);
 
 // Esc is the stop key. No confirmation: a stop that needs a second click is
 // not an emergency stop.
 window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!$("confirm_modal").hidden) { closeConfirm(false); return; }
-    socket.sendAction(protocol.actions.safeDisable);
+    emergencyStop();
 });
 
 $("button_reset_controllers").addEventListener("click", () => {
@@ -473,6 +479,10 @@ $("button_set_depth").addEventListener("click", () => {
 
 $("button_start_mission").addEventListener("click", () => {
     socket.sendAction(protocol.actions.startMission);
+});
+
+$("button_stop_mission").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.stopMission);
 });
 
 $("button_magnet_on").addEventListener("click", () => {

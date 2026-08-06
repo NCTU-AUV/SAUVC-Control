@@ -273,18 +273,19 @@ class GUINode(Node):
     def _stm32_log_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_STM32_LOG, msg.data)
 
-    def _start_mission(self):
-        """Kick off the BehaviorTree in the autonomy stack.
+    def _publish_mission_enable(self, enabled: bool, note: str):
+        """Start or stop the BehaviorTree in the autonomy stack.
 
         Cross-stack on purpose: the two containers share one ROS graph, and
         making the operator open a shell just to publish one Bool was the last
         step of the run that could not be done from the GUI.
         """
         msg = Bool()
-        msg.data = True
+        msg.data = bool(enabled)
         self._start_mission_publisher.publish(msg)
-        self.get_logger().info("Published start_mission")
-        self._send_service_result("start_mission", True, "Mission start published")
+        self.get_logger().info(f"Published start_mission={enabled}")
+        self._send_service_result(
+            "start_mission" if enabled else "stop_mission", True, note)
 
     def _send_service_result(self, service_key: str, success: bool, message: str):
         self.aiohttp_server.send_topic(
@@ -293,8 +294,25 @@ class GUINode(Node):
         )
 
     def _supervisor_mode_callback(self, msg: String):
+        previous = self._last_mode
         self._last_mode = msg.data
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_MODE, msg.data)
+
+        # Leaving autonomy must stop the mission. The supervisor only gates the
+        # wrench bus, which lives in this stack; the BehaviorTree runs in the
+        # other container and never hears about a mode change. Without this the
+        # tree keeps ticking after STOP, Manual, or a FAULT the operator did not
+        # trigger — burning its timeouts, overwriting the depth target through
+        # SetDepth, and resuming from the middle of the run on the next arm.
+        #
+        # Driven off the mode topic rather than the button press so a fault the
+        # operator never clicked is covered too.
+        if (previous in protocol.AUTONOMOUS_MODES
+                and msg.data not in protocol.AUTONOMOUS_MODES):
+            self.get_logger().warning(
+                f"Left autonomy ({previous} -> {msg.data}); stopping mission")
+            self._publish_mission_enable(
+                False, f"Mission stopped: vehicle left autonomy ({msg.data})")
 
     def _publish_connect_snapshot(self):
         """Re-send non-periodic state whenever a browser connects.
@@ -531,7 +549,9 @@ class GUINode(Node):
                 # gated behind a confirmation dialog.
                 self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
             elif action_name == protocol.ACTION_START_MISSION:
-                self._start_mission()
+                self._publish_mission_enable(True, "Mission start published")
+            elif action_name == protocol.ACTION_STOP_MISSION:
+                self._publish_mission_enable(False, "Mission stop published")
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 

@@ -100,8 +100,13 @@
         <div class="panel">
             <div class="panel-head"><span class="panel-title">Mission</span></div>
             <div class="field-row">
-                <button class="primary" id="button_start_mission">Start mission</button>
-                <span class="hint">publishes to the autonomy stack</span>
+                <button class="primary" id="button_start_mission">Start</button>
+                <button class="danger" id="button_stop_mission">Stop</button>
+            </div>
+            <div class="hint">
+                The BehaviorTree runs in the autonomy container and does not see
+                mode changes, so leaving autonomy stops it automatically &mdash;
+                including on a fault nobody clicked.
             </div>
         </div>
 
