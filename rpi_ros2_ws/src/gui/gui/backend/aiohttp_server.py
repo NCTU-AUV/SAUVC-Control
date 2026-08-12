@@ -23,19 +23,25 @@ class AIOHTTPServer:
     def send_topic(self, topic_name, msg):
         payload = json.dumps(protocol.topic_payload(topic_name, msg))
 
-        # Keep only the latest payload per topic while disconnected.
+        # Fan out to every open client. This used to keep a single
+        # websocket_response, so opening a second browser silently stole the
+        # feed from the first: the older page stayed connected but stopped
+        # receiving, showing a frozen mode and stale readings with no clue that
+        # anything was wrong. A laptop plus a phone at the poolside is the
+        # obvious way to hit it.
         with self._pending_lock:
-            if (
-                not self.event_loop
-                or self.websocket_response is None
-                or self.websocket_response.closed
-            ):
+            live = [ws for ws in self._clients if not ws.closed]
+            self._clients = live
+            if not self.event_loop or not live:
+                # Keep only the latest payload per topic while nobody is
+                # listening, so a client that connects later starts current.
                 self._pending_topic_payloads[topic_name] = payload
                 return
             loop = self.event_loop
-            websocket_response = self.websocket_response
 
-        asyncio.run_coroutine_threadsafe(websocket_response.send_str(payload), loop)
+        for websocket_response in live:
+            asyncio.run_coroutine_threadsafe(
+                websocket_response.send_str(payload), loop)
 
     async def websocket_handler(self, request):
         websocket_response = web.WebSocketResponse(
@@ -45,11 +51,17 @@ class AIOHTTPServer:
 
         # Flush the latest pending message for each topic accumulated before connect.
         with self._pending_lock:
-            self.websocket_response = websocket_response
+            self._clients.append(websocket_response)
             pending_payloads = list(self._pending_topic_payloads.values())
             self._pending_topic_payloads = {}
         for payload in pending_payloads:
             await websocket_response.send_str(payload)
+
+        if self._on_connect is not None:
+            try:
+                self._on_connect()
+            except Exception as exc:                      # noqa: BLE001
+                print(f"on_connect hook failed: {exc}")
 
         async for msg in websocket_response:
             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -63,6 +75,10 @@ class AIOHTTPServer:
                     % websocket_response.exception()
                 )
 
+        with self._pending_lock:
+            if websocket_response in self._clients:
+                self._clients.remove(websocket_response)
+
         print('websocket connection closed')
 
         return websocket_response
@@ -73,8 +89,13 @@ class AIOHTTPServer:
         response.headers['Cache-Control'] = 'no-store'
         return response
 
-    def __init__(self, msg_callback):
+    def __init__(self, msg_callback, on_connect=None):
         self._msg_callback = msg_callback
+        # Called once per websocket connection so the node can re-send state
+        # that is not periodic (camera sources, the current mode). The pending
+        # buffer below only covers the *first* client — it is drained on flush,
+        # so a reload or a second browser would otherwise start blank.
+        self._on_connect = on_connect
 
         app = web.Application(middlewares=[AIOHTTPServer.no_cache_middleware])
 
@@ -85,7 +106,7 @@ class AIOHTTPServer:
         app.router.add_static('/static/', STATIC_DIR)
 
         self.runner = web.AppRunner(app)
-        self.websocket_response = None
+        self._clients = []
         self.event_loop = None
         self._pending_topic_payloads = {}
         self._pending_lock = threading.Lock()

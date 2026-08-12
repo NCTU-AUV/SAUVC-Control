@@ -1,0 +1,345 @@
+/* Orca control GUI — design tokens and base components.
+ *
+ * Telemetry-dashboard register: cool neutral ground, one restrained accent for
+ * anything interactive, and semantic colour held back for state. The rule worth
+ * keeping is that colour means something: a screen with no amber or red on it
+ * is a vehicle with nothing wrong, so an operator can check the page at a
+ * glance instead of reading it.
+ *
+ * Every readout uses tabular numerals. Proportional digits make a value that
+ * updates at 10 Hz jitter sideways, which reads as instability that is not
+ * there and makes trends genuinely hard to see.
+ */
+
+:root {
+    --bg:         #0F1318;
+    --surface:    #161B22;
+    --surface-2:  #1D242E;
+    --surface-3:  #232B37;
+    --border:     #262E3A;
+    --border-2:   #323C4B;
+
+    --text:       #E4E8EE;
+    --text-2:     #98A2B3;
+    --text-3:     #667085;
+
+    --accent:     #4A9EDB;
+    --accent-dim: #1E3A52;
+
+    --ok:         #4CAF7D;
+    --ok-dim:     #16301F;
+    --warn:       #D9A03C;
+    --warn-dim:   #33280F;
+    --crit:       #E5605E;
+    --crit-dim:   #3A1A1C;
+
+    --r-sm: 4px;
+    --r-md: 6px;
+    --r-lg: 10px;
+
+    --f-sans: system-ui, -apple-system, "Segoe UI", Roboto,
+              "Noto Sans TC", "PingFang TC", sans-serif;
+    --f-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+    --topbar-h: 56px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--f-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- numerics ---------- */
+
+.num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+}
+
+.mono {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- staleness ----------
+ * A readout that has stopped updating looks exactly like one that is holding
+ * steady. Anything carrying live data gets this class when its topic goes
+ * quiet, so "no data" can never be mistaken for "no change".
+ */
+.is-stale {
+    color: var(--text-3) !important;
+    position: relative;
+}
+.is-stale::after {
+    content: "stale";
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--warn);
+    margin-left: 6px;
+    vertical-align: 2px;
+}
+
+/* ---------- labels & readouts ---------- */
+
+.label {
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    font-weight: 500;
+}
+
+.readout {
+    font-variant-numeric: tabular-nums;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.readout-unit {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-3);
+    margin-left: 2px;
+}
+
+/* ---------- panels ---------- */
+
+.panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.panel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+}
+
+.panel-note {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+/* ---------- buttons ---------- */
+
+button {
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: var(--r-md);
+    padding: 7px 12px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+}
+button:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: var(--accent);
+}
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+button.primary {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--text);
+}
+button.primary:hover:not(:disabled) { background: #24486A; }
+
+button.danger {
+    background: var(--crit-dim);
+    border-color: var(--crit);
+    color: var(--crit);
+}
+button.danger:hover:not(:disabled) {
+    background: var(--crit);
+    color: #fff;
+}
+
+button.estop {
+    background: var(--crit);
+    border-color: var(--crit);
+    color: #fff;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    padding: 8px 18px;
+}
+button.estop:hover { background: #F0736F; border-color: #F0736F; }
+
+/* ---------- toggles ---------- */
+
+.toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: var(--r-md);
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    transition: background 0.12s, border-color 0.12s;
+}
+.toggle:hover { border-color: var(--accent); }
+.toggle[aria-pressed="true"] {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+.toggle[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.toggle-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-3);
+    flex: none;
+}
+.toggle[aria-pressed="true"] .toggle-dot { background: var(--accent); }
+
+/* ---------- inputs ---------- */
+
+input[type="number"], input[type="text"], select {
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: var(--r-md);
+    padding: 6px 9px;
+    width: 100%;
+    min-width: 0;
+}
+input:focus, select:focus, button:focus-visible, .toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.field-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+}
+
+/* ---------- status pills ---------- */
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-2);
+    background: var(--surface-2);
+    color: var(--text-2);
+    white-space: nowrap;
+}
+.pill.ok   { background: var(--ok-dim);   border-color: var(--ok);   color: var(--ok); }
+.pill.warn { background: var(--warn-dim); border-color: var(--warn); color: var(--warn); }
+.pill.crit { background: var(--crit-dim); border-color: var(--crit); color: var(--crit); }
+.pill.crit { animation: pulse 1.6s ease-in-out infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .pill.crit { animation: none; }
+    * { transition: none !important; }
+}
+
+/* ---------- toast ---------- */
+
+.toast-stack {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 100;
+    max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+    background: var(--surface-3);
+    border: 1px solid var(--border-2);
+    border-left-width: 3px;
+    border-radius: var(--r-md);
+    padding: 10px 14px;
+    font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.toast.ok   { border-left-color: var(--ok); }
+.toast.crit { border-left-color: var(--crit); }
+.toast-title { font-weight: 600; margin-bottom: 2px; }
+.toast-body  { color: var(--text-2); }
+
+/* ---------- modal ---------- */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 9, 12, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 16px;
+}
+.modal {
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    border-radius: var(--r-lg);
+    padding: 20px;
+    max-width: 440px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.modal-title { font-size: 15px; font-weight: 650; }
+.modal-body  { color: var(--text-2); font-size: 13px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+[hidden] { display: none !important; }

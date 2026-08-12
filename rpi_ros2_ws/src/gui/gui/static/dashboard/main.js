@@ -1,358 +1,552 @@
-const protocol = GuiProtocol;
-const websocket = new WebSocket(
-    protocol.makeWebsocketUrl(window.location.hostname),
-    protocol.websocketSubprotocol
-);
-const stm32LogState = {
-    shouldAutoScroll: true,
+// Dashboard wiring. Layout is index.html, tokens are shared/theme.css,
+// transport is shared/ws.js.
+
+const protocol = window.GuiProtocol;
+const socket = new window.GuiSocket(protocol);
+
+const $ = (id) => document.getElementById(id);
+
+// How long a topic may go quiet before its readout is marked stale. Generous
+// enough not to flicker on a slow tick, tight enough that a dead link shows up
+// before somebody acts on a frozen number.
+const STALE_MS = {
+    [protocol.topics.depthM]: 1500,
+    [protocol.topics.targetDepthM]: 8000,
+    [protocol.topics.killed]: 8000,
+    [protocol.topics.thrustersEnabled]: 8000,
+    [protocol.topics.systemManagerMode]: 8000,
 };
 
-function formatDisplayNumber(value, decimalPlaces) {
-    let numberValue = null;
-    if (typeof value === "number") {
-        numberValue = value;
-    } else if (typeof value === "string" && value.trim() !== "") {
-        numberValue = Number(value);
-    }
-    if (Number.isFinite(numberValue)) {
-        return numberValue.toFixed(decimalPlaces);
-    }
-    return value;
+const state = {
+    mode: null,
+    targetDepth: 0,
+    killed: null,
+    cameras: [],
+    cameraPort: 8080,
+    mainCameraId: null,
+};
+
+// ---------------------------------------------------------------- formatting
+
+function fmt(value, places = 2) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(places) : "—";
 }
 
-function isAtBottom(element, thresholdPx = 8) {
-    return element.scrollTop + element.clientHeight >= element.scrollHeight - thresholdPx;
+function setMetric(id, value, places, unit = "") {
+    const el = $(id);
+    if (!el) return;
+    const text = fmt(value, places);
+    el.innerHTML = unit
+        ? `${text}<span class="readout-unit">${unit}</span>`
+        : text;
 }
 
-function updateStm32LogAutoScrollState() {
-    const element = document.getElementById("stm32_debug_log");
-    if (!element) {
-        return;
-    }
-    stm32LogState.shouldAutoScroll = isAtBottom(element);
+function setPill(id, text, tone) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = "pill" + (tone ? ` ${tone}` : "");
 }
 
-function formatOptionalDisplayNumber(value, decimalPlaces) {
-    const formatted = formatDisplayNumber(value, decimalPlaces);
-    return formatted ?? "none";
+// ------------------------------------------------------------------- toasts
+
+function toast(title, body, tone = "") {
+    const stack = $("toast_stack");
+    const el = document.createElement("div");
+    el.className = "toast" + (tone ? ` ${tone}` : "");
+    el.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
+    el.querySelector(".toast-title").textContent = title;
+    el.querySelector(".toast-body").textContent = body || "";
+    stack.appendChild(el);
+    // Failures stay long enough to read and copy; successes get out of the way.
+    window.setTimeout(() => el.remove(), tone === "crit" ? 9000 : 4000);
 }
 
-function setReadoutText(elementId, value, decimalPlaces = 3) {
-    const element = document.getElementById(elementId);
-    if (!element) {
-        return;
-    }
-    if (!Number.isFinite(value)) {
-        element.innerHTML = "none";
-        return;
-    }
-    element.innerHTML = formatDisplayNumber(value, decimalPlaces);
+// ------------------------------------------------------------------- confirm
+
+let confirmResolve = null;
+
+function confirmAction(title, body) {
+    $("confirm_title").textContent = title;
+    $("confirm_body").textContent = body;
+    $("confirm_modal").hidden = false;
+    $("confirm_ok").focus();
+    return new Promise((resolve) => { confirmResolve = resolve; });
 }
 
-function syncNumberInputIfIdle(elementId, value) {
-    const element = document.getElementById(elementId);
-    if (!element || document.activeElement === element || !Number.isFinite(value)) {
-        return;
+function closeConfirm(result) {
+    $("confirm_modal").hidden = true;
+    if (confirmResolve) {
+        confirmResolve(result);
+        confirmResolve = null;
     }
-    element.value = String(value);
 }
 
-function syncPidParamDisplay(prefix, params) {
-    if (!params) {
-        return;
+$("confirm_ok").addEventListener("click", () => closeConfirm(true));
+$("confirm_cancel").addEventListener("click", () => closeConfirm(false));
+$("confirm_modal").addEventListener("click", (e) => {
+    if (e.target === $("confirm_modal")) closeConfirm(false);
+});
+
+// ---------------------------------------------------------------------- tabs
+
+document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => {
+            const selected = t === tab;
+            t.setAttribute("aria-selected", String(selected));
+            $(`tab_${t.dataset.tab}`).hidden = !selected;
+        });
+    });
+});
+
+// ---------------------------------------------------------------------- mode
+//
+// Every toggle is derived from system_manager/mode, never from what the
+// operator last clicked. The old dashboard only synced the manual checkbox, so
+// after the vehicle faulted on its own the autonomy box still showed enabled —
+// the UI and the vehicle disagreed and only the vehicle was right.
+
+const MODE_TONE = {
+    [protocol.modes.fault]: "crit",
+    [protocol.modes.safeDisabled]: "",
+    [protocol.modes.manual]: "warn",
+    [protocol.modes.depthHold]: "ok",
+    [protocol.modes.autonomous]: "ok",
+    [protocol.modes.autonomousAndDepthHold]: "ok",
+};
+
+function applyMode(mode) {
+    state.mode = mode;
+    const faulted = mode === protocol.modes.fault;
+
+    setPill("mode_pill", mode || "—", MODE_TONE[mode] ?? "");
+
+    const depthHold = mode === protocol.modes.depthHold
+        || mode === protocol.modes.autonomousAndDepthHold;
+    const autonomous = mode === protocol.modes.autonomous
+        || mode === protocol.modes.autonomousAndDepthHold;
+    const manual = mode === protocol.modes.manual;
+
+    $("toggle_depth_hold").setAttribute("aria-pressed", String(depthHold));
+    $("toggle_autonomous").setAttribute("aria-pressed", String(autonomous));
+    $("toggle_manual").setAttribute("aria-pressed", String(manual));
+
+    // In FAULT the supervisor rejects every enable request, so present them as
+    // unavailable rather than letting the operator click into a refusal.
+    for (const id of ["toggle_depth_hold", "toggle_autonomous", "toggle_manual"]) {
+        $(id).setAttribute("aria-disabled", String(faulted));
+    }
+    $("mode_hint").textContent = faulted
+        ? "Latched in FAULT. Press STOP to clear it before arming."
+        : "";
+
+    updateKeyboardAvailability();
+}
+
+// ------------------------------------------------------------------ keyboard
+
+function depthHoldActive() {
+    return state.mode === protocol.modes.depthHold
+        || state.mode === protocol.modes.autonomousAndDepthHold;
+}
+
+// Keys are live in the two modes where the operator is the one flying.
+// wrench_sum has no per-mode source filter — a single global active flag — so
+// the GUI wrench really is summed in DEPTH_HOLD too, verified on the running
+// stack: force.x 20 arrived at control/wrench_command next to the PID's
+// force.z. Deliberately not enabled in the autonomous modes, where piloting
+// would silently fight the decision node on the same bus.
+function pilotingAllowed() {
+    return state.mode === protocol.modes.manual || depthHoldActive();
+}
+
+const pilot = new window.KeyboardPilot(socket, protocol, {
+    getEnabled: pilotingAllowed,
+    getTargetDepth: () => state.targetDepth,
+    onState: (s) => {
+        document.querySelectorAll(".key").forEach((el) => {
+            el.classList.toggle("held", s.held.has(el.dataset.key));
+        });
+    },
+});
+pilot.start();
+
+function updateKeyboardAvailability() {
+    const manual = state.mode === protocol.modes.manual;
+    const holding = depthHoldActive();
+    const active = pilotingAllowed();
+    setPill("keyboard_pill", active ? "active" : "inactive", active ? "ok" : "");
+
+    if (holding) {
+        $("keyboard_hint").textContent =
+            "WASD steers, Q/E moves the depth target and the PID flies to it.";
+        $("keyboard_hint").className = "hint";
+    } else if (manual) {
+        // Worth saying plainly: MANUAL is the one mode that deactivates the
+        // depth PID, so the setpoint Q/E writes has nothing acting on it.
+        $("keyboard_hint").textContent =
+            "WASD steers. Q/E still moves the depth target, but Manual "
+            + "deactivates the depth PID so nothing acts on it — switch to "
+            + "Depth hold to actually change depth.";
+        $("keyboard_hint").className = "hint warn";
+    } else {
+        $("keyboard_hint").textContent =
+            "Enable Depth hold (or Manual) to pilot from the keyboard.";
+        $("keyboard_hint").className = "hint";
+    }
+    $("kb_vertical_note").textContent = holding
+        ? "depth target" : manual ? "depth target (PID off)" : "unavailable";
+}
+
+$("kb_force_input").addEventListener("change", (e) => {
+    pilot.translationForceN = Number(e.target.value) || 0;
+});
+$("kb_torque_input").addEventListener("change", (e) => {
+    pilot.yawTorqueNm = Number(e.target.value) || 0;
+});
+$("kb_depth_step_input").addEventListener("change", (e) => {
+    pilot.depthStepM = Number(e.target.value) || 0;
+});
+
+// -------------------------------------------------------------------- camera
+
+// The topic goes in raw. web_video_server does not URL-decode the query
+// parameter, so percent-encoding the slashes makes it reject the request with
+// "Invalid topic name" and return an empty multipart body — a stream that
+// connects and then shows nothing. Topic names only ever contain slashes,
+// alphanumerics and underscores, all of which are safe here unescaped.
+function streamUrl(topic) {
+    return `http://${window.location.hostname}:${state.cameraPort}`
+        + `/stream?topic=${topic}`;
+}
+
+// Availability comes from the backend, which checks the ROS graph. The browser
+// cannot work it out for itself: an <img> pointed at an MJPEG stream fires
+// neither load nor error dependably, because the response is an endless
+// multipart body rather than one image.
+function renderCameras() {
+    if (!state.cameras.length) return;
+    if (!state.cameras.some((c) => c.id === state.mainCameraId)) {
+        state.mainCameraId = state.cameras[0].id;
     }
 
-    const fieldMappings = [
-        ["proportional_gain", "p"],
-        ["integral_gain", "i"],
-        ["derivative_gain", "d"],
-        ["derivative_smoothing_factor", "smoothing"],
+    const main = state.cameras.find((c) => c.id === state.mainCameraId);
+    const mainImg = $("camera_main_img");
+    $("camera_main_label").textContent = main.label;
+    $("camera_main_empty").hidden = main.available;
+    const mainUrl = main.available ? streamUrl(main.topic) : "";
+    // Only reassign when it actually changed, or the stream restarts on every
+    // refresh and the picture visibly stutters.
+    if (mainImg.getAttribute("src") !== mainUrl) {
+        mainImg.src = mainUrl;
+    }
+    mainImg.hidden = !main.available;
+
+    const thumbs = $("camera_thumbs");
+    const wanted = state.cameras.filter((c) => c.id !== main.id);
+    const signature = wanted.map((c) => `${c.id}:${c.topic}:${c.available}`).join("|");
+    if (thumbs.dataset.signature === signature) return;
+    thumbs.dataset.signature = signature;
+    thumbs.innerHTML = "";
+
+    for (const source of wanted) {
+        const button = document.createElement("button");
+        button.className = "camera-thumb";
+        button.title = `Show ${source.label}`;
+        if (source.available) {
+            const img = document.createElement("img");
+            img.alt = source.label;
+            img.src = streamUrl(source.topic);
+            button.appendChild(img);
+        } else {
+            const empty = document.createElement("div");
+            empty.className = "camera-empty";
+            empty.textContent = "No stream";
+            button.appendChild(empty);
+        }
+        const badge = document.createElement("div");
+        badge.className = "camera-badge";
+        badge.textContent = source.label;
+        button.appendChild(badge);
+        button.addEventListener("click", () => {
+            state.mainCameraId = source.id;
+            renderCameras();
+        });
+        thumbs.appendChild(button);
+    }
+}
+
+// -------------------------------------------------------------- thruster grid
+
+const THRUSTER_ORDER = [4, 5, 0, 1, 2, 3, 6, 7];
+
+function buildThrusterGrid() {
+    const grid = $("thruster_grid");
+    const image = document.createElement("div");
+    image.className = "thruster-img";
+    image.innerHTML =
+        '<img src="/static/shared/thruster_numbering.png" alt="Thruster numbering">';
+    grid.appendChild(image);
+
+    for (const index of THRUSTER_ORDER) {
+        const row = document.createElement("div");
+        row.className = `thruster-row t${index}`;
+        row.innerHTML = `
+            <span class="label">T${index}</span>
+            <input type="number" min="0" max="3000" value="1500"
+                   id="pwm_set_${index}" aria-label="Thruster ${index} PWM">
+            <span class="num" id="pwm_rx_${index}">—</span>`;
+        grid.appendChild(row);
+    }
+}
+buildThrusterGrid();
+
+// --------------------------------------------------------------- topic wiring
+
+socket.onTopic(protocol.topics.systemManagerMode, applyMode);
+
+socket.onTopic(protocol.topics.systemManagerStatus, (msg) => {
+    // The supervisor puts the fault reason here; it is the only record of why
+    // the vehicle stopped, so it stays on screen rather than in a toast.
+    $("fault_reason").textContent =
+        state.mode === protocol.modes.fault ? String(msg ?? "") : "";
+});
+
+socket.onTopic(protocol.topics.depthM, (msg) => {
+    setMetric("depth_value", msg, 2, "m");
+});
+
+socket.onTopic(protocol.topics.targetDepthM, (msg) => {
+    state.targetDepth = Number(msg);
+    setMetric("target_depth_value", msg, 2, "m");
+    const input = $("target_depth_input");
+    if (document.activeElement !== input && Number.isFinite(state.targetDepth)) {
+        input.value = state.targetDepth.toFixed(2);
+    }
+});
+
+socket.onTopic(protocol.topics.killed, (msg) => {
+    state.killed = msg === true;
+    setPill("kill_pill", state.killed ? "Kill ACTIVE" : "Kill clear",
+        state.killed ? "crit" : "ok");
+});
+
+socket.onTopic(protocol.topics.thrustersEnabled, (msg) => {
+    setPill("thrusters_pill", msg === true ? "Thrusters on" : "Thrusters off",
+        msg === true ? "ok" : "");
+});
+
+socket.onTopic(protocol.topics.electromagnetEnabled, (msg) => {
+    setPill("magnet_pill", msg === true ? "holding" : "released",
+        msg === true ? "ok" : "");
+});
+
+socket.onTopic(protocol.topics.thrustersPwmUs, (values) => {
+    const list = values || [];
+    for (let i = 0; i < 8; i += 1) {
+        const el = $(`pwm_rx_${i}`);
+        if (el) el.textContent = list[i] ?? "—";
+    }
+});
+
+socket.onTopic(protocol.topics.depthPidParams, (params) => {
+    const map = {
+        proportional_gain: "p",
+        integral_gain: "i",
+        derivative_gain: "d",
+        derivative_smoothing_factor: "smoothing",
+    };
+    for (const [key, suffix] of Object.entries(map)) {
+        const value = Number((params || {})[key]);
+        const readout = $(`pid_${suffix}_current`);
+        if (readout) readout.textContent = fmt(value, 3);
+        const input = $(`pid_${suffix}_input`);
+        if (input && document.activeElement !== input && Number.isFinite(value)) {
+            input.value = String(value);
+        }
+    }
+});
+
+socket.onTopic(protocol.topics.serviceResult, (result) => {
+    const ok = result?.success === true;
+    toast(ok ? "Accepted" : "Rejected",
+        `${result?.service ?? ""} — ${result?.message ?? ""}`,
+        ok ? "ok" : "crit");
+});
+
+socket.onTopic(protocol.topics.bagStatus, (status) => {
+    const recording = status?.recording === true;
+    setPill("bag_pill", recording ? "Bag REC" : "Bag idle", recording ? "ok" : "");
+    $("bag_state").textContent = recording ? "recording" : "not running";
+    $("bag_name").textContent = status?.bag_name ?? "—";
+    $("bag_size").textContent =
+        status?.size_mb == null ? "—" : `${status.size_mb} MB`;
+    $("bag_free").textContent =
+        status?.free_gb == null ? "—" : `${status.free_gb} GB`;
+});
+
+socket.onTopic(protocol.topics.cameraSources, (payload) => {
+    state.cameraPort = payload?.port ?? 8080;
+    state.cameras = payload?.sources ?? [];
+    renderCameras();
+});
+
+socket.onTopic(protocol.topics.flashStm32Status, (status) => {
+    const ok = status?.success === true;
+    $("flash_status").textContent =
+        `${ok ? "success" : "failed"}${status?.message ? `: ${status.message}` : ""}`;
+});
+
+socket.onTopic(protocol.topics.stm32Log, (line) => {
+    if (!line) return;
+    const el = $("stm32_log");
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    const lines = el.textContent.split("\n").filter(Boolean);
+    lines.push(String(line));
+    el.textContent = lines.slice(-200).join("\n");
+    if (atBottom) el.scrollTop = el.scrollHeight;
+});
+
+socket.onConnectionChange((connected) => {
+    setPill("link_pill", connected ? "Link up" : "Link down",
+        connected ? "ok" : "crit");
+    if (!connected) {
+        // Values on screen are now history. Say so rather than letting them
+        // sit there looking current.
+        applyMode(null);
+    }
+});
+
+// ------------------------------------------------------------------- staleness
+
+window.setInterval(() => {
+    const marks = [
+        ["depth_value", protocol.topics.depthM],
+        ["target_depth_value", protocol.topics.targetDepthM],
     ];
+    for (const [id, topic] of marks) {
+        $(id)?.classList.toggle("is-stale", socket.isStale(topic, STALE_MS[topic]));
+    }
+}, 500);
 
-    fieldMappings.forEach(([paramName, fieldKey]) => {
-        const value = Number(params[paramName]);
-        setReadoutText(`${prefix}_${fieldKey}_current`, value, 3);
-        syncNumberInputIfIdle(`${prefix}_${fieldKey}_input`, value);
+// --------------------------------------------------------------------- actions
+
+function toggleHandler(id, action) {
+    $(id).addEventListener("click", () => {
+        const el = $(id);
+        if (el.getAttribute("aria-disabled") === "true") return;
+        const next = el.getAttribute("aria-pressed") !== "true";
+        socket.sendAction(action, {enabled: next});
+        // Deliberately not flipping the pill here: it moves only when
+        // system_manager/mode says the vehicle actually changed.
     });
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    const element = document.getElementById("stm32_debug_log");
-    if (!element) {
-        return;
-    }
-    element.addEventListener("scroll", updateStm32LogAutoScrollState);
-    stm32LogState.shouldAutoScroll = isAtBottom(element);
+toggleHandler("toggle_depth_hold", protocol.actions.setSupervisorDepthHold);
+toggleHandler("toggle_autonomous", protocol.actions.setSupervisorAutonomousMode);
+toggleHandler("toggle_manual", protocol.actions.setSupervisorManualMode);
+toggleHandler("toggle_simulation", protocol.actions.setSupervisorSimulationMode);
+
+$("estop_button").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.safeDisable);
 });
 
-websocket.onmessage = (event) => {
-  console.log(event.data);
+// Esc is the stop key. No confirmation: a stop that needs a second click is
+// not an emergency stop.
+window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("confirm_modal").hidden) { closeConfirm(false); return; }
+    socket.sendAction(protocol.actions.safeDisable);
+});
 
-    const msg_json_object = JSON.parse(event.data);
+$("button_reset_controllers").addEventListener("click", () => {
+    socket.sendController(protocol.controllerGroups.depthControl,
+        protocol.controllerActions.reset);
+});
 
-    if (msg_json_object.type == protocol.types.topic) {
-        if (msg_json_object.data.topic_name == protocol.topics.killed) {
-            document.getElementById("killed").innerHTML = msg_json_object.data.msg;
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.depthM) {
-            document.getElementById("pressure_sensor_depth_m").innerHTML = formatDisplayNumber(
-                msg_json_object.data.msg,
-                3
-            );
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.targetDepthM) {
-            const targetDepth = Number(msg_json_object.data.msg);
-            setReadoutText("target_depth_m_current", targetDepth, 3);
-            syncNumberInputIfIdle("target_depth_m_input", targetDepth);
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.depthPidParams) {
-            syncPidParamDisplay("depth_pid", msg_json_object.data.msg || {});
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.thrustersPwmUs) {
-            const pwmValues = msg_json_object.data.msg || [];
-            for (let i = 0; i < 8; i += 1) {
-                const value = pwmValues[i] ?? "";
-                const element = document.getElementById("pwm_output_signal_value_us_" + i);
-                if (element) {
-                    element.innerHTML = value;
-                }
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.thrustersEnabled) {
-            const enabled = msg_json_object.data.msg === true;
-            const element = document.getElementById("thrusters_enabled_status");
-            if (element) {
-                element.innerHTML = enabled ? "on" : "off";
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.systemManagerMode) {
-            const mode = msg_json_object.data.msg;
-            const element = document.getElementById("system_manager_mode");
-            if (element) {
-                element.innerHTML = mode;
-            }
-            const checkbox = document.getElementById("supervisor_manual_mode_input");
-            if (checkbox) {
-                checkbox.checked = mode === "MANUAL";
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.systemManagerStatus) {
-            const element = document.getElementById("system_manager_status");
-            if (element) {
-                element.innerHTML = msg_json_object.data.msg;
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.electromagnetEnabled) {
-            const enabled = msg_json_object.data.msg === true;
-            const checkbox = document.getElementById("electromagnet_set_on_input");
-            const status = document.getElementById("electromagnet_set_on_status");
-            if (checkbox) {
-                checkbox.checked = enabled;
-            }
-            if (status) {
-                status.innerHTML = enabled ? "on" : "off";
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.flashStm32Status) {
-            const status = msg_json_object.data.msg || {};
-            const message = status.message || "";
-            const successText = status.success === true ? "success" : "failed";
-            const element = document.getElementById("flash_stm32_status");
-            if (element) {
-                element.innerHTML = message ? `${successText}: ${message}` : successText;
-            }
-        }
-        if (msg_json_object.data.topic_name == protocol.topics.stm32Log) {
-            const element = document.getElementById("stm32_debug_log");
-            if (element) {
-                const line = msg_json_object.data.msg || "";
-                if (line) {
-                    const lines = element.textContent.split("\n").filter(Boolean);
-                    lines.push(line);
-                    const maxLines = 200;
-                    const trimmed = lines.slice(-maxLines);
-                    element.textContent = trimmed.join("\n");
-                    if (stm32LogState.shouldAutoScroll) {
-                        element.scrollTop = element.scrollHeight;
-                    }
-                }
-            }
-        }
+$("button_set_depth").addEventListener("click", () => {
+    socket.sendTopic(protocol.topics.targetDepthM,
+        {data: $("target_depth_input").value});
+});
 
-    }
-};
+$("button_start_mission").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.startMission);
+});
 
-websocket.onopen = (event) => {
-    console.log("websocket.onopen");
-};
+$("button_magnet_on").addEventListener("click", () => {
+    socket.sendTopic(protocol.topics.electromagnetEnabled, {data: true});
+});
+$("button_magnet_off").addEventListener("click", () => {
+    socket.sendTopic(protocol.topics.electromagnetEnabled, {data: false});
+});
 
-function send_controller_action(group, action) {
-    websocket.send(JSON.stringify(protocol.makeControllerMessage(group, action)));
-}
-
-function enable_depth_control() {
-    send_controller_action(
-        protocol.controllerGroups.depthControl,
-        protocol.controllerActions.enable
-    );
-}
-
-function disable_depth_control() {
-    send_controller_action(
-        protocol.controllerGroups.depthControl,
-        protocol.controllerActions.disable
-    );
-}
-
-function reset_depth_control() {
-    send_controller_action(
-        protocol.controllerGroups.depthControl,
-        protocol.controllerActions.reset
-    );
-}
-
-function set_supervisor_simulation_mode(enabled) {
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.setSupervisorSimulationMode,
-        {enabled: enabled}
-    )));
-}
-
-function set_supervisor_manual_mode(enabled) {
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.setSupervisorManualMode,
-        {enabled: enabled}
-    )));
-}
-
-function set_supervisor_autonomous_mode(enabled) {
-    websocket.send(JSON.stringify(protocol.makeActionMessage(
-        protocol.actions.setSupervisorAutonomousMode,
-        {enabled: Boolean(enabled)}
-    )));
-}
-
-function supervisor_autonomous_mode_input_onchange() {
-    const checkbox = document.getElementById("supervisor_autonomous_mode_input");
-    set_supervisor_autonomous_mode(Boolean(checkbox && checkbox.checked));
-}
-
-function supervisor_manual_mode_input_onchange() {
-    const checkbox = document.getElementById("supervisor_manual_mode_input");
-    set_supervisor_manual_mode(Boolean(checkbox && checkbox.checked));
-}
-
-function supervisor_simulation_mode_input_onchange() {
-    const checkbox = document.getElementById("supervisor_simulation_mode_input");
-    set_supervisor_simulation_mode(Boolean(checkbox && checkbox.checked));
-}
-
-function set_target_depth_m_button_onclick() {
-    const target_depth_m = document.getElementById("target_depth_m_input").value;
-    websocket.send(JSON.stringify(protocol.makeTopicMessage(
-        protocol.topics.targetDepthM,
-        {data: target_depth_m}
-    )));
-}
-
-function set_electromagnet_on(enabled) {
-    websocket.send(JSON.stringify(protocol.makeTopicMessage(
-        protocol.topics.electromagnetEnabled,
-        {data: enabled}
-    )));
-}
-
-function electromagnet_set_on_input_onchange() {
-    const checkbox = document.getElementById("electromagnet_set_on_input");
-    set_electromagnet_on(Boolean(checkbox && checkbox.checked));
-}
-
-function set_depth_pid_params_button_onclick() {
-    const p = document.getElementById("depth_pid_p_input").value;
-    const i = document.getElementById("depth_pid_i_input").value;
-    const d = document.getElementById("depth_pid_d_input").value;
-    const smoothing = document.getElementById("depth_pid_smoothing_input").value;
-
-    websocket.send(JSON.stringify(protocol.makeControllerMessage(
+$("button_set_pid").addEventListener("click", () => {
+    socket.sendController(
         protocol.controllerGroups.depthControl,
         protocol.controllerActions.setPidParams,
         {
             params: {
-                proportional_gain: p,
-                integral_gain: i,
-                derivative_gain: d,
-                derivative_smoothing_factor: smoothing,
-            }
-        }
-    )));
-}
+                proportional_gain: $("pid_p_input").value,
+                integral_gain: $("pid_i_input").value,
+                derivative_gain: $("pid_d_input").value,
+                derivative_smoothing_factor: $("pid_smoothing_input").value,
+            },
+        });
+});
 
-function initialize_all_thrusters_button_onclick(){
-      console.log("initialize_all_thrusters_button_onclick");
-
-      websocket.send(JSON.stringify(protocol.makeActionMessage(
-          protocol.actions.initializeAllThrusters,
-          {goal: ""}
-      )));
-}
-
-function flash_stm32_button_onclick() {
-    console.log("flash_stm32_button_onclick");
-    const element = document.getElementById("flash_stm32_status");
-    if (element) {
-        element.innerHTML = "running...";
-    }
-    const logElement = document.getElementById("stm32_debug_log");
-    if (logElement) {
-        logElement.textContent = "";
-        logElement.scrollTop = logElement.scrollHeight;
-        stm32LogState.shouldAutoScroll = true;
-    }
-    websocket.send(JSON.stringify(protocol.makeActionMessage(protocol.actions.flashStm32)));
-}
-
-function clear_stm32_log_button_onclick() {
-    const logElement = document.getElementById("stm32_debug_log");
-    if (logElement) {
-        logElement.textContent = "";
-        logElement.scrollTop = logElement.scrollHeight;
-        stm32LogState.shouldAutoScroll = true;
-    }
-}
-
-function set_pwm_output_signal_value_us_button_onclick() {
-    const pwm_values = [];
-    for (let i = 0; i < 8; i += 1) {
-        const value = document.getElementById("set_pwm_output_signal_value_us_" + i).value;
-        pwm_values.push(value);
-    }
-
-    console.log("set_pwm_output_signal_value_us_button_onclick", pwm_values);
-
-    websocket.send(JSON.stringify(protocol.makeTopicMessage(
-        protocol.topics.thrustersPwmUs,
-        {data: pwm_values}
-    )));
-}
-
-function set_control_wrench_command_button_onclick() {
-    var msg = {
+$("button_send_wrench").addEventListener("click", () => {
+    socket.sendTopic(protocol.topics.wrenchCommand, {
         force: {
-            x: document.getElementById("control_wrench_command_force_x").value,
-            y: document.getElementById("control_wrench_command_force_y").value,
-            z: document.getElementById("control_wrench_command_force_z").value,
+            x: $("wrench_fx").value,
+            y: $("wrench_fy").value,
+            z: $("wrench_fz").value,
         },
         torque: {
-            x: document.getElementById("control_wrench_command_torque_x").value,
-            y: document.getElementById("control_wrench_command_torque_y").value,
-            z: document.getElementById("control_wrench_command_torque_z").value,
-        }
-    }
+            x: $("wrench_tx").value,
+            y: $("wrench_ty").value,
+            z: $("wrench_tz").value,
+        },
+    });
+});
 
-    console.log("set_control_wrench_command_button_onclick", msg);
+// --- destructive, behind a confirmation -------------------------------------
 
-    websocket.send(JSON.stringify(protocol.makeTopicMessage(
-        protocol.topics.wrenchCommand,
-        msg
-    )));
-}
+$("button_send_pwm").addEventListener("click", async () => {
+    const values = [];
+    for (let i = 0; i < 8; i += 1) values.push($(`pwm_set_${i}`).value);
+    const ok = await confirmAction(
+        "Publish raw PWM?",
+        "This writes the thrusters directly, bypassing the wrench bus and the "
+        + "supervisor mode gate. The vehicle will move even in SAFE_DISABLED. "
+        + `Values: ${values.join(", ")}`);
+    if (ok) socket.sendTopic(protocol.topics.thrustersPwmUs, {data: values});
+});
+
+$("button_init_thrusters").addEventListener("click", async () => {
+    const ok = await confirmAction(
+        "Initialise all thrusters?",
+        "Runs the ESC arming sequence. Keep hands and tools clear of the props.");
+    if (ok) socket.sendAction(protocol.actions.initializeAllThrusters);
+});
+
+$("button_flash").addEventListener("click", async () => {
+    const ok = await confirmAction(
+        "Flash STM32 firmware?",
+        "Overwrites the firmware on the microcontroller. The vehicle will be "
+        + "uncontrollable until it finishes and reboots.");
+    if (!ok) return;
+    $("flash_status").textContent = "running…";
+    $("stm32_log").textContent = "";
+    socket.sendAction(protocol.actions.flashStm32);
+});
+
+$("button_clear_log").addEventListener("click", () => {
+    $("stm32_log").textContent = "";
+});
+
+// ----------------------------------------------------------------------- go
+
+applyMode(null);
+socket.connect();

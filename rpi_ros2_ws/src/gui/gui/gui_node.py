@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 
 import rclpy
 from rclpy.node import Node
@@ -54,7 +56,10 @@ class GUINode(Node):
             for _ in range(self._thruster_count)
         ]
 
-        self.aiohttp_server = AIOHTTPServer(self._msg_callback)
+        self.aiohttp_server = AIOHTTPServer(
+            self._msg_callback,
+            on_connect=self._publish_connect_snapshot,
+        )
         self.aiohttp_server.start_threading()
         self._robot_namespace = self.get_namespace().strip('/')
         self._pid_param_names = (
@@ -223,6 +228,39 @@ class GUINode(Node):
             self._request_pid_params,
         )
 
+        # --- camera streams -------------------------------------------------
+        # The browser must not hardcode these: the real robot's RealSense sits
+        # under a fixed /orca prefix while the simulator publishes camera and
+        # depth under the vehicle namespace. Declared as parameters so a
+        # different rig is a config change, not a frontend edit.
+        ns = self._robot_namespace or "orca_auv"
+        self.declare_parameter("camera_front_topic", "/orca/color/image_raw")
+        self.declare_parameter("camera_detections_topic", "/yolov8_processed_image")
+        self.declare_parameter("camera_bottom_topic", "/orca/usb_cam/image_raw")
+        self.declare_parameter("camera_sim_front_topic", f"/{ns}/color/image_raw")
+        self.declare_parameter("camera_sim_bottom_topic", f"/{ns}/camera/bottom/image_raw")
+        self.declare_parameter("web_video_server_port", 8080)
+
+        # --- bag recording --------------------------------------------------
+        # record.launch.py wraps `ros2 bag record` in an ExecuteProcess, so
+        # there is no status topic to subscribe to. Derive it instead: the
+        # recorder's presence in the graph says whether it is running, and the
+        # bag directory says how much has been written.
+        self.declare_parameter(
+            "bag_dir", os.environ.get("ORCA_BAG_DIR", "/root/bags"))
+        self._bag_status_timer = self.create_timer(2.0, self._publish_bag_status)
+        # Re-resolved periodically: the autonomy stack needs minutes to come
+        # up, so a list sent once at connect would leave the detection view
+        # permanently marked unavailable.
+        self._camera_timer = self.create_timer(5.0, self._publish_camera_sources)
+
+        self._start_mission_publisher = self.create_publisher(
+            Bool,
+            "/orca/decision/start_mission",
+            10,
+        )
+        self._last_mode = None
+
     def _killed_callback(self, msg):
         self.aiohttp_server.send_topic(protocol.TOPIC_KILLED, msg.data)
 
@@ -235,8 +273,129 @@ class GUINode(Node):
     def _stm32_log_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_STM32_LOG, msg.data)
 
+    def _start_mission(self):
+        """Kick off the BehaviorTree in the autonomy stack.
+
+        Cross-stack on purpose: the two containers share one ROS graph, and
+        making the operator open a shell just to publish one Bool was the last
+        step of the run that could not be done from the GUI.
+        """
+        msg = Bool()
+        msg.data = True
+        self._start_mission_publisher.publish(msg)
+        self.get_logger().info("Published start_mission")
+        self._send_service_result("start_mission", True, "Mission start published")
+
+    def _send_service_result(self, service_key: str, success: bool, message: str):
+        self.aiohttp_server.send_topic(
+            protocol.TOPIC_SERVICE_RESULT,
+            {"service": service_key, "success": bool(success), "message": message},
+        )
+
     def _supervisor_mode_callback(self, msg: String):
+        self._last_mode = msg.data
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_MODE, msg.data)
+
+    def _publish_connect_snapshot(self):
+        """Re-send non-periodic state whenever a browser connects.
+
+        The server's pending buffer only rescues the *first* client: it is
+        drained on flush, so a reload or a second tab would come up with no
+        camera list and a blank mode until the vehicle happened to publish.
+        """
+        self._publish_camera_sources()
+        self._publish_bag_status()
+        if self._last_mode is not None:
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_SYSTEM_MANAGER_MODE, self._last_mode)
+
+    def _param_str(self, name: str) -> str:
+        return self.get_parameter(name).get_parameter_value().string_value
+
+    def _publish_camera_sources(self):
+        """Tell the browser which streams exist and where to fetch them.
+
+        Both the real and the simulated topic are listed for the two vehicle
+        cameras. web_video_server serves whichever one actually has a
+        publisher, and the page falls back to the other, so a single build
+        works on the bench and in the simulator without a config switch.
+        """
+        port = self.get_parameter("web_video_server_port") \
+            .get_parameter_value().integer_value
+        candidates = [
+            ("front", "Front camera",
+             ["camera_front_topic", "camera_sim_front_topic"]),
+            ("detections", "Detections",
+             ["camera_detections_topic"]),
+            ("bottom", "Bottom camera",
+             ["camera_bottom_topic", "camera_sim_bottom_topic"]),
+        ]
+
+        # Resolve against the live graph here rather than letting the browser
+        # probe. An <img> pointed at an MJPEG stream never fires load or error
+        # reliably — the response is an endless multipart body — so a frontend
+        # fallback cannot tell "no publisher" from "first frame still coming".
+        # This node already knows which topics exist.
+        live = {name for name, _ in self.get_topic_names_and_types()}
+        sources = []
+        for source_id, label, param_names in candidates:
+            topics = [self._param_str(name) for name in param_names]
+            resolved = next((t for t in topics if t in live), None)
+            sources.append({
+                "id": source_id,
+                "label": label,
+                "topic": resolved or topics[0],
+                "available": resolved is not None,
+            })
+
+        self.aiohttp_server.send_topic(
+            protocol.TOPIC_CAMERA_SOURCES,
+            {"port": port, "sources": sources},
+        )
+
+    def _publish_bag_status(self):
+        """Derive recording state from the graph plus the bag directory.
+
+        There is no status topic to subscribe to — record.launch.py runs
+        `ros2 bag record` as a plain process — so "is it recording" comes from
+        the recorder node being present, and the size comes from the newest
+        directory under bag_dir.
+        """
+        recording = any(
+            name.startswith("rosbag2_recorder")
+            for name, _ in self.get_node_names_and_namespaces()
+        )
+        bag_dir = self._param_str("bag_dir")
+        bag_name = None
+        size_mb = None
+        free_gb = None
+        try:
+            free_gb = round(shutil.disk_usage(bag_dir).free / (1024 ** 3), 1)
+            entries = [
+                os.path.join(bag_dir, entry) for entry in os.listdir(bag_dir)
+                if os.path.isdir(os.path.join(bag_dir, entry))
+            ]
+            if entries:
+                newest = max(entries, key=os.path.getmtime)
+                bag_name = os.path.basename(newest)
+                total = sum(
+                    os.path.getsize(os.path.join(newest, f))
+                    for f in os.listdir(newest)
+                    if os.path.isfile(os.path.join(newest, f))
+                )
+                size_mb = round(total / (1024 ** 2), 1)
+        except OSError as exc:
+            self.get_logger().debug(f"bag status unavailable: {exc}")
+
+        self.aiohttp_server.send_topic(
+            protocol.TOPIC_BAG_STATUS,
+            {
+                "recording": recording,
+                "bag_name": bag_name,
+                "size_mb": size_mb,
+                "free_gb": free_gb,
+            },
+        )
 
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
@@ -359,6 +518,20 @@ class GUINode(Node):
                     self._call_supervisor(protocol.SUPERVISOR_SERVICE_MANUAL)
                 else:
                     self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
+            elif action_name == protocol.ACTION_SET_SUPERVISOR_DEPTH_HOLD:
+                if bool(msg_data.get("enabled")):
+                    self._call_supervisor(protocol.SUPERVISOR_SERVICE_DEPTH_HOLD)
+                else:
+                    self._call_supervisor(protocol.SUPERVISOR_SERVICE_DISABLE_DEPTH_HOLD)
+            elif action_name == protocol.ACTION_SAFE_DISABLE:
+                # Emergency stop. safe_disabled clears every controller group,
+                # disables the controllers and deactivates the wrench bus, so
+                # it is the one call that reliably zeroes thrust. It is also
+                # how a latched FAULT is cleared, which is why it is never
+                # gated behind a confirmation dialog.
+                self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
+            elif action_name == protocol.ACTION_START_MISSION:
+                self._start_mission()
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 
@@ -478,11 +651,13 @@ class GUINode(Node):
             return
 
         if not client.service_is_ready():
-            self.get_logger().warning(f"Supervisor service not ready: {service_key}")
+            message = f"Supervisor service not ready: {service_key}"
+            self.get_logger().warning(message)
             self.aiohttp_server.send_topic(
                 protocol.TOPIC_SYSTEM_MANAGER_STATUS,
-                f"Supervisor service not ready: {service_key}",
+                message,
             )
+            self._send_service_result(service_key, False, message)
             return
 
         future = client.call_async(Trigger.Request())
@@ -500,6 +675,7 @@ class GUINode(Node):
                 protocol.TOPIC_SYSTEM_MANAGER_STATUS,
                 message,
             )
+            self._send_service_result(service_key, False, message)
             return
 
         message = response.message
@@ -512,6 +688,11 @@ class GUINode(Node):
                 f"Supervisor accepted {service_key}: {message}"
             )
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+        # The outcome has to reach the browser, not just the log. A rejected
+        # request — arming while latched in FAULT is the common one — otherwise
+        # produced no visible effect whatsoever, so the operator saw a ticked
+        # checkbox and a vehicle that did nothing.
+        self._send_service_result(service_key, response.success, message)
 
     def _set_supervisor_simulation_mode(self, enabled: bool):
         client = self._get_param_client("supervisor_node")

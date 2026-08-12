@@ -1,500 +1,300 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>ORCA AUV GUI</title>
-    <style>
-        :root {
-            --bg: #0c1220;
-            --bg-alt: #111a2b;
-            --card: #161f33;
-            --text: #e7ecf6;
-            --muted: #9fb0d0;
-            --accent: #5ed1b6;
-            --accent-2: #7aa7ff;
-            --border: #27324a;
-            --shadow: rgba(4, 10, 22, 0.35);
-        }
-        * {
-            box-sizing: border-box;
-        }
-        body {
-            margin: 0;
-            padding: 24px;
-            font-family: "Space Grotesk", "Noto Sans", sans-serif;
-            color: var(--text);
-            background:
-                radial-gradient(900px 500px at 10% -10%, rgba(94, 209, 182, 0.16), transparent 60%),
-                radial-gradient(900px 500px at 90% -20%, rgba(122, 167, 255, 0.2), transparent 60%),
-                var(--bg);
-            line-height: 1.5;
-        }
-        p, div {
-            margin: 0 0 12px;
-        }
-        .status-bar {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 16px 24px;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        .row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px 12px;
-            align-items: center;
-        }
-        .grid-2 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 8px 12px;
-        }
-        .grid-3 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 8px 12px;
-        }
-        .grid-4 {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 8px 12px;
-        }
-        .nowrap-readout {
-            min-width: 0;
-            white-space: nowrap;
-        }
-        .stack {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .inline-field {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px 10px;
-            align-items: center;
-        }
-        .current-readout {
-            color: var(--muted);
-            font-size: 14px;
-        }
-        .pid-panel-row {
-            grid-column: 1 / -1;
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 16px;
-        }
-        .control-panel-row {
-            grid-column: 1 / -1;
-            display: grid;
-            grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.35fr) minmax(360px, 1fr);
-            gap: 16px;
-            align-items: start;
-        }
-        .pid-axis-panel {
-            min-width: 0;
-        }
-        .pid-axis-title {
-            color: var(--muted);
-            font-size: 14px;
-            margin-bottom: 8px;
-        }
-        .thruster-pwm-grid {
-            display: grid;
-            grid-template-columns: minmax(220px, 1fr) minmax(150px, 220px) minmax(220px, 1fr);
-            grid-template-areas:
-                "thruster-4 numbering thruster-5"
-                "thruster-0 numbering thruster-1"
-                "thruster-2 numbering thruster-3"
-                "thruster-6 numbering thruster-7";
-            gap: 10px 18px;
-            margin-bottom: 12px;
-            align-items: center;
-        }
-        .thruster-pwm-grid div,
-        .thruster-pwm-grid label {
-            margin: 0;
-        }
-        .thruster-pwm-row {
-            display: grid;
-            grid-template-columns: minmax(68px, auto) minmax(90px, 1fr) minmax(78px, auto);
-            gap: 8px;
-            align-items: center;
-            min-width: 0;
-            padding: 8px 10px;
-            background: var(--bg-alt);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-        }
-        .thruster-pwm-row .inline-field {
-            flex-wrap: nowrap;
-            min-width: 0;
-        }
-        .thruster-pwm-row input[type="number"] {
-            min-width: 0;
-            width: 100%;
-        }
-        .thruster-pwm-0 { grid-area: thruster-0; }
-        .thruster-pwm-1 { grid-area: thruster-1; }
-        .thruster-pwm-2 { grid-area: thruster-2; }
-        .thruster-pwm-3 { grid-area: thruster-3; }
-        .thruster-pwm-4 { grid-area: thruster-4; }
-        .thruster-pwm-5 { grid-area: thruster-5; }
-        .thruster-pwm-6 { grid-area: thruster-6; }
-        .thruster-pwm-7 { grid-area: thruster-7; }
-        .thruster-pwm-label {
-            color: var(--muted);
-        }
-        .thruster-pwm-panel {
-            grid-column: 1 / -1;
-        }
-        .thruster-numbering {
-            grid-area: numbering;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100%;
-        }
-        .thruster-numbering img {
-            display: block;
-            width: 100%;
-            max-width: 260px;
-            height: auto;
-            border-radius: 8px;
-            border: 1px solid var(--border);
-            background: var(--bg-alt);
-        }
-        @media (max-width: 920px) {
-            .thruster-pwm-grid {
-                grid-template-columns: 1fr;
-                grid-template-areas:
-                    "numbering"
-                    "thruster-4"
-                    "thruster-5"
-                    "thruster-0"
-                    "thruster-1"
-                    "thruster-2"
-                    "thruster-3"
-                    "thruster-6"
-                    "thruster-7";
-            }
-            .thruster-numbering {
-                min-height: auto;
-            }
-        }
-        @media (max-width: 1180px) {
-            .control-panel-row {
-                grid-template-columns: 1fr;
-            }
-            .pid-panel-row {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-            .pid-axis-panel:last-child {
-                grid-column: 1 / -1;
-            }
-        }
-        @media (max-width: 820px) {
-            .pid-panel-row {
-                grid-template-columns: 1fr;
-            }
-            .pid-axis-panel:last-child {
-                grid-column: auto;
-            }
-        }
-        .layout {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-            gap: 16px;
-        }
-        button {
-            border: 1px solid var(--border);
-            background: linear-gradient(135deg, rgba(94, 209, 182, 0.16), rgba(122, 167, 255, 0.18));
-            color: var(--text);
-            padding: 8px 14px;
-            border-radius: 10px;
-            cursor: pointer;
-            box-shadow: 0 8px 20px var(--shadow);
-            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-        }
-        button:hover {
-            transform: translateY(-1px);
-            border-color: rgba(94, 209, 182, 0.7);
-            box-shadow: 0 12px 28px var(--shadow);
-        }
-        button:active {
-            transform: translateY(0);
-        }
-        input[type="number"] {
-            width: 160px;
-            background: var(--bg-alt);
-            border: 1px solid var(--border);
-            color: var(--text);
-            padding: 6px 10px;
-            border-radius: 8px;
-        }
-        input[type="number"]:focus {
-            outline: none;
-            border-color: var(--accent-2);
-            box-shadow: 0 0 0 2px rgba(122, 167, 255, 0.2);
-        }
-        input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
-            accent-color: var(--accent);
-        }
-        .panel {
-            background: var(--card);
-            padding: 16px 18px;
-            border-radius: 14px;
-            border: 1px solid var(--border);
-            box-shadow: 0 10px 24px var(--shadow);
-        }
-        body > p {
-            font-size: 15px;
-            color: var(--muted);
-        }
-        i {
-            color: var(--accent);
-            font-style: normal;
-        }
-    </style>
-    <script src="/static/shared/protocol.js"></script>
-    <script src="/static/dashboard/main.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orca AUV — Control</title>
+<link rel="stylesheet" href="/static/shared/theme.css">
+<link rel="stylesheet" href="/static/dashboard/dashboard.css">
 </head>
 <body>
-    <div class="status-bar">
-        <div>sensors/killed: <i id="killed">none</i></div>
-        <div>system_manager/mode: <i id="system_manager_mode">none</i></div>
-        <div>system_manager/status: <i id="system_manager_status">none</i></div>
-        <label class="inline-field">
-            manual
-            <input
-                type="checkbox"
-                id="supervisor_manual_mode_input"
-                onchange="supervisor_manual_mode_input_onchange()"
-            >
-        </label>
-        <label class="inline-field" title="放行 Autonomy 堆疊的 control/wrench_sources/decision">
-            autonomous
-            <input
-                type="checkbox"
-                id="supervisor_autonomous_mode_input"
-                onchange="supervisor_autonomous_mode_input_onchange()"
-            >
-        </label>
-        <label class="inline-field">
-            simulation
-            <input
-                type="checkbox"
-                id="supervisor_simulation_mode_input"
-                onchange="supervisor_simulation_mode_input_onchange()"
-            >
-        </label>
+<div class="app">
+
+<!-- ============ always-visible status strip ============ -->
+<header class="topbar">
+    <div class="brand">ORCA<span>control</span></div>
+
+    <div class="topbar-metrics">
+        <span class="pill" id="mode_pill">&mdash;</span>
+        <span id="fault_reason"></span>
+
+        <div class="metric">
+            <span class="label">Depth</span>
+            <span class="value" id="depth_value">&mdash;<span class="readout-unit">m</span></span>
+        </div>
+        <div class="metric">
+            <span class="label">Target</span>
+            <span class="value" id="target_depth_value">&mdash;<span class="readout-unit">m</span></span>
+        </div>
+
+        <span class="pill" id="kill_pill">Kill &mdash;</span>
+        <span class="pill" id="thrusters_pill">Thrusters &mdash;</span>
+        <span class="pill" id="link_pill">Link &mdash;</span>
+        <span class="pill" id="bag_pill">Bag &mdash;</span>
     </div>
 
-    <div class="layout">
-        <div class="control-panel-row">
-            <div class="panel">
-                <div class="row">
-                    <button onclick="flash_stm32_button_onclick()">flash_stm32</button>
-                    <div>flash_stm32_status: <i id="flash_stm32_status">idle</i></div>
-                </div>
-                <div class="row">
-                    <div>diagnostics/stm32/log:</div>
-                    <button onclick="clear_stm32_log_button_onclick()">clear</button>
-                </div>
-                <pre id="stm32_debug_log" style="max-height: 220px; overflow: auto; margin: 8px 0 0;"></pre>
-            </div>
+    <button class="estop" id="estop_button" title="Stop all output (Esc)">STOP</button>
+</header>
 
-            <div class="panel">
-                <div>sensors/depth_m: <i id="pressure_sensor_depth_m">none</i></div>
-                <div class="row">
-                    <div>control/targets/depth_m:</div>
-                    <input type="number" id="target_depth_m_input">
-                    <button onclick="set_target_depth_m_button_onclick()">set</button>
-                </div>
-                <div class="current-readout">current: <i id="target_depth_m_current">none</i></div>
-                <div class="row">
-                    <div>depth_hold</div>
-                    <button onclick="enable_depth_control()">on</button>
-                    <button onclick="disable_depth_control()">off</button>
-                    <button onclick="reset_depth_control()">reset</button>
-                </div>
-                <div>
-                    <div style="margin-bottom: 8px;">depth PID params:</div>
-                    <div class="grid-2">
-                        <div class="inline-field">P: <input type="number" step="any" id="depth_pid_p_input"></div>
-                        <div class="inline-field">I: <input type="number" step="any" id="depth_pid_i_input"></div>
-                        <div class="inline-field">D: <input type="number" step="any" id="depth_pid_d_input"></div>
-                        <div class="inline-field">smoothing: <input type="number" step="any" id="depth_pid_smoothing_input"></div>
-                    </div>
-                    <div class="grid-2 current-readout" style="margin-top: 8px;">
-                        <div>P current: <i id="depth_pid_p_current">none</i></div>
-                        <div>I current: <i id="depth_pid_i_current">none</i></div>
-                        <div>D current: <i id="depth_pid_d_current">none</i></div>
-                        <div>smoothing current: <i id="depth_pid_smoothing_current">none</i></div>
-                    </div>
-                    <div class="row" style="margin-top: 8px;">
-                        <button onclick="set_depth_pid_params_button_onclick()">set PID params</button>
-                    </div>
-                </div>
-                <div class="inline-field">
-                    constant sink force (N):
-                    <input type="number" id="constant_sink_force_N_input">
-                    <button onclick="set_constant_sink_force_button_onclick()">set</button>
-                </div>
+<!-- ============ tabs ============ -->
+<nav class="tabbar" role="tablist">
+    <button class="tab" role="tab" data-tab="flight" aria-selected="true">Flight</button>
+    <button class="tab" role="tab" data-tab="tuning" aria-selected="false">Tuning</button>
+    <button class="tab" role="tab" data-tab="diagnostics" aria-selected="false">Diagnostics</button>
+</nav>
+
+<main>
+
+<!-- ================= FLIGHT ================= -->
+<section id="tab_flight" role="tabpanel">
+<div class="flight-grid">
+
+    <!-- ---- camera ---- -->
+    <div class="panel camera-panel">
+        <div class="panel-head">
+            <span class="panel-title">Camera</span>
+            <span class="panel-note" id="camera_note">click a thumbnail to swap</span>
+        </div>
+        <div class="camera-main">
+            <img id="camera_main_img" alt="">
+            <div class="camera-badge" id="camera_main_label">&mdash;</div>
+            <div class="camera-empty" id="camera_main_empty">
+                <div>No stream</div>
+                <div class="hint">web_video_server has no publisher on this topic</div>
             </div>
         </div>
+        <div class="camera-thumbs" id="camera_thumbs"></div>
+    </div>
 
-        <div class="panel thruster-pwm-panel">
-            <div>thrusters/pwm_us / received_pwm_output_signal_value_us:</div>
-            <div class="row">
-                <div>thrusters/enabled: <i id="thrusters_enabled_status">none</i></div>
-                <button onclick="initialize_all_thrusters_button_onclick()">initialize_all_thrusters</button>
-            </div>
-            <div class="thruster-pwm-grid">
-                <div class="thruster-pwm-row thruster-pwm-4">
-                    <div>thruster 4</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_4" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_4">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-5">
-                    <div>thruster 5</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_5" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_5">none</i></div>
-                </div>
-                <div class="thruster-numbering">
-                    <img src="/static/shared/thruster_numbering.png" alt="Thruster numbering">
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-0">
-                    <div>thruster 0</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_0" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_0">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-1">
-                    <div>thruster 1</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_1" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_1">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-2">
-                    <div>thruster 2</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_2" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_2">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-3">
-                    <div>thruster 3</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_3" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_3">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-6">
-                    <div>thruster 6</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_6" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_6">none</i></div>
-                </div>
-                <div class="thruster-pwm-row thruster-pwm-7">
-                    <div>thruster 7</div>
-                    <label class="inline-field">set <input type="number" id="set_pwm_output_signal_value_us_7" min="0" max="3000" value="1500"></label>
-                    <div class="thruster-pwm-label">received: <i id="pwm_output_signal_value_us_7">none</i></div>
-                </div>
-            </div>
-            <button onclick="set_pwm_output_signal_value_us_button_onclick()">publish topic</button>
-        </div>
+    <div class="side-column">
 
+        <!-- ---- arming ---- -->
         <div class="panel">
-            <div>actuators/electromagnet/enabled:</div>
-            <div class="row">
-                <label class="inline-field">
-                    <input type="checkbox" id="electromagnet_set_on_input" onchange="electromagnet_set_on_input_onchange()">
-                    <span>set_on</span>
-                </label>
-                <button onclick="set_electromagnet_on(true)">on</button>
-                <button onclick="set_electromagnet_on(false)">off</button>
-                <div>status: <i id="electromagnet_set_on_status">off</i></div>
+            <div class="panel-head"><span class="panel-title">Vehicle mode</span></div>
+            <div class="grid-2">
+                <button class="toggle" id="toggle_depth_hold" aria-pressed="false">
+                    <span class="toggle-dot"></span>Depth hold
+                </button>
+                <button class="toggle" id="toggle_autonomous" aria-pressed="false">
+                    <span class="toggle-dot"></span>Autonomy
+                </button>
+                <button class="toggle" id="toggle_manual" aria-pressed="false">
+                    <span class="toggle-dot"></span>Manual
+                </button>
+                <button id="button_reset_controllers">Reset controllers</button>
+            </div>
+            <div class="hint" id="mode_hint"></div>
+        </div>
+
+        <!-- ---- depth ---- -->
+        <div class="panel">
+            <div class="panel-head"><span class="panel-title">Depth target</span></div>
+            <div class="field-row">
+                <input type="number" step="0.05" min="0" id="target_depth_input" aria-label="Target depth in metres">
+                <button id="button_set_depth">Set</button>
+            </div>
+                        <div class="hint">Q / E step this by the amount set in Tuning. Depth hold must be on for the PID to fly to it.</div>
+        </div>
+
+        <!-- ---- mission ---- -->
+        <div class="panel">
+            <div class="panel-head"><span class="panel-title">Mission</span></div>
+            <div class="field-row">
+                <button class="primary" id="button_start_mission">Start mission</button>
+                <span class="hint">publishes to the autonomy stack</span>
             </div>
         </div>
 
+        <!-- ---- ball electromagnet ---- -->
         <div class="panel">
-            control/wrench_command:
-            <div class="row" style="align-items: flex-start;">
-                <div class="stack">
-                    <div>force:</div>
-                    <div class="inline-field">x: <input type="number" id="control_wrench_command_force_x"></div>
-                    <div class="inline-field">y: <input type="number" id="control_wrench_command_force_y"></div>
-                    <div class="inline-field">z: <input type="number" id="control_wrench_command_force_z"></div>
-                </div>
-                <div class="stack">
-                    <div>torque:</div>
-                    <div class="inline-field">x: <input type="number" id="control_wrench_command_torque_x"></div>
-                    <div class="inline-field">y: <input type="number" id="control_wrench_command_torque_y"></div>
-                    <div class="inline-field">z: <input type="number" id="control_wrench_command_torque_z"></div>
-                </div>
+            <div class="panel-head">
+                <span class="panel-title">Ball magnet</span>
+                <span class="pill" id="magnet_pill">&mdash;</span>
             </div>
-            <button onclick="set_control_wrench_command_button_onclick()">publish topic</button>
-        </div>
-
-        <div class="panel">
-            <div style="margin-bottom: 12px;">
-                <strong>Xbox Gamepad Status:</strong>
-                <div id="gamepad_status" style="margin-top: 8px; padding: 12px; background: var(--bg-alt); border-radius: 8px; font-family: monospace; font-size: 13px;">
-                    <div>Connection: <i id="gamepad_connection_status">Not Connected</i></div>
-                    <div style="margin-top: 8px;">
-                        <strong>Analog Sticks:</strong>
-                        <div style="margin-left: 12px; margin-top: 4px;">
-                            <div>Left Stick: X=<i id="gamepad_left_x">0.00</i> Y=<i id="gamepad_left_y">0.00</i></div>
-                            <div>Right Stick: X=<i id="gamepad_right_x">0.00</i> Y=<i id="gamepad_right_y">0.00</i></div>
-                        </div>
-                    </div>
-                    <div style="margin-top: 8px;">
-                        <strong>Output Motion Control:</strong>
-                        <div style="margin-left: 12px; margin-top: 4px;">
-                            <div>Force X (fwd): <i id="gamepad_output_force_x">0.00</i> N</div>
-                            <div>Force Y (strafe): <i id="gamepad_output_force_y">0.00</i> N</div>
-                            <div>Force Z (depth): <i id="gamepad_output_force_z">0.00</i> N</div>
-                            <div>Torque Z (rotation): <i id="gamepad_output_torque_z">0.00</i> Nm</div>
-                        </div>
-                    </div>
-                    <div style="margin-top: 8px;">
-                        <strong>Buttons:</strong>
-                        <div style="margin-left: 12px; margin-top: 4px;">
-                            <div>A (Init): <i id="gamepad_button_a" style="color: var(--muted);">Released</i></div>
-                            <div>B (E-Stop): <i id="gamepad_button_b" style="color: var(--muted);">Released</i></div>
-                        </div>
-                    </div>
-                </div>
+            <div class="field-row">
+                <button id="button_magnet_on">Hold</button>
+                <button id="button_magnet_off">Release</button>
             </div>
         </div>
 
+        <!-- ---- keyboard ---- -->
         <div class="panel">
-            simple motion control interface:
-            <div class="grid-3">
-                <div class="inline-field">
-                    translational push force (N):
-                    <input type="number" id="translational_push_force_N_input">
-                    <button onclick="set_translational_push_force_button_onclick()">set</button>
-                </div>
-
-                <div class="inline-field">
-                    rotational twist torque (Nm):
-                    <input type="number" id="rotational_twist_torque_Nm_input">
-                    <button onclick="set_rotational_twist_torque_button_onclick()">set</button>
-                </div>
+            <div class="panel-head">
+                <span class="panel-title">Keyboard</span>
+                <span class="pill" id="keyboard_pill">inactive</span>
             </div>
-
-            <div class="grid-3" style="margin-top: 8px;">
-                <button id="push_down_button">push down</button>
-                <button id="push_up_button">push up</button>
-                <button id="push_left_button">push left</button>
-                <button id="push_right_button">push right</button>
-                <button id="push_backward_button">push backward</button>
-                <button id="push_forward_button">push forward</button>
-                <button id="twist_leftward_button">twist leftward</button>
-                <button id="twist_rightward_button" onup>twist rightward</button>
+            <div class="keymap">
+                <div class="key key-w" data-key="KeyW">W</div>
+                <div class="key key-a" data-key="KeyA">A</div>
+                <div class="key key-s" data-key="KeyS">S</div>
+                <div class="key key-d" data-key="KeyD">D</div>
             </div>
+            <div class="keymap-aux">
+                <div class="key" data-key="KeyQ">Q</div>
+                <div class="key" data-key="ArrowLeft">&larr;</div>
+                <div class="key" data-key="ArrowRight">&rarr;</div>
+                <div class="key" data-key="KeyE">E</div>
+            </div>
+            <div class="keymap-legend">
+                <kbd>W / S</kbd><span>forward / reverse</span>
+                <kbd>A / D</kbd><span>strafe left / right</span>
+                <kbd>&larr; / &rarr;</kbd><span>yaw left / right</span>
+                <kbd>Q / E</kbd><span>up / down &mdash; <b id="kb_vertical_note">unavailable</b></span>
+            </div>
+            <div class="hint" id="keyboard_hint">Enable Manual to pilot from the keyboard.</div>
+        </div>
+
+    </div>
+</div>
+</section>
+
+<!-- ================= TUNING ================= -->
+<section id="tab_tuning" role="tabpanel" hidden>
+<div class="col-grid">
+
+    <div class="panel">
+        <div class="panel-head"><span class="panel-title">Depth PID</span></div>
+        <div class="grid-2">
+            <label class="field"><span class="label">P</span>
+                <input type="number" step="any" id="pid_p_input"></label>
+            <label class="field"><span class="label">I</span>
+                <input type="number" step="any" id="pid_i_input"></label>
+            <label class="field"><span class="label">D</span>
+                <input type="number" step="any" id="pid_d_input"></label>
+            <label class="field"><span class="label">Smoothing</span>
+                <input type="number" step="any" id="pid_smoothing_input"></label>
+        </div>
+        <div class="grid-2 hint">
+            <span>live P <b class="num" id="pid_p_current">&mdash;</b></span>
+            <span>live I <b class="num" id="pid_i_current">&mdash;</b></span>
+            <span>live D <b class="num" id="pid_d_current">&mdash;</b></span>
+            <span>live S <b class="num" id="pid_smoothing_current">&mdash;</b></span>
+        </div>
+        <div class="field-row">
+            <button class="primary" id="button_set_pid">Apply</button>
+            <span class="hint">gains are re-read every control loop &mdash; no restart</span>
         </div>
     </div>
 
-    <script src="/static/shared/simple_motion_control_interface.js"></script>
-    <script src="/static/shared/gamepad_control.js"></script>
+    <div class="panel">
+        <div class="panel-head"><span class="panel-title">Manual wrench</span></div>
+        <div class="grid-3">
+            <label class="field"><span class="label">Force X</span>
+                <input type="number" step="any" id="wrench_fx" value="0"></label>
+            <label class="field"><span class="label">Force Y</span>
+                <input type="number" step="any" id="wrench_fy" value="0"></label>
+            <label class="field"><span class="label">Force Z</span>
+                <input type="number" step="any" id="wrench_fz" value="0"></label>
+            <label class="field"><span class="label">Torque X</span>
+                <input type="number" step="any" id="wrench_tx" value="0"></label>
+            <label class="field"><span class="label">Torque Y</span>
+                <input type="number" step="any" id="wrench_ty" value="0"></label>
+            <label class="field"><span class="label">Torque Z</span>
+                <input type="number" step="any" id="wrench_tz" value="0"></label>
+        </div>
+        <div class="field-row">
+            <button id="button_send_wrench">Publish once</button>
+            <span class="hint">only takes effect in Manual</span>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-head"><span class="panel-title">Keyboard strength</span></div>
+        <div class="grid-2">
+            <label class="field"><span class="label">Translation (N)</span>
+                <input type="number" step="1" min="0" id="kb_force_input" value="20"></label>
+            <label class="field"><span class="label">Yaw (Nm)</span>
+                <input type="number" step="1" min="0" id="kb_torque_input" value="10"></label>
+            <label class="field"><span class="label">Depth step (m)</span>
+                <input type="number" step="0.01" min="0" id="kb_depth_step_input" value="0.05"></label>
+        </div>
+        <div class="hint">
+            Applies immediately. Down is positive, so E goes deeper.
+        </div>
+    </div>
+
+</div>
+</section>
+
+<!-- ================= DIAGNOSTICS ================= -->
+<section id="tab_diagnostics" role="tabpanel" hidden>
+<div class="col-grid">
+
+    <div class="panel" style="grid-column: 1 / -1;">
+        <div class="panel-head">
+            <span class="panel-title">Thruster PWM</span>
+            <span class="panel-note">bypasses the wrench bus and the supervisor mode gate</span>
+        </div>
+        <div class="thruster-grid" id="thruster_grid"></div>
+        <div class="field-row">
+            <button class="danger" id="button_send_pwm">Publish PWM</button>
+            <button id="button_init_thrusters">Initialise all thrusters</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">STM32</span>
+            <span class="panel-note" id="flash_status">idle</span>
+        </div>
+        <div class="field-row">
+            <button class="danger" id="button_flash">Flash firmware</button>
+            <button id="button_clear_log">Clear log</button>
+        </div>
+        <pre class="log" id="stm32_log"></pre>
+    </div>
+
+    <div class="panel">
+        <div class="panel-head"><span class="panel-title">Recording</span></div>
+        <div class="grid-2">
+            <div class="field"><span class="label">State</span>
+                <span class="num" id="bag_state">&mdash;</span></div>
+            <div class="field"><span class="label">Free disk</span>
+                <span class="num" id="bag_free">&mdash;</span></div>
+            <div class="field" style="grid-column: 1 / -1;"><span class="label">Current bag</span>
+                <span class="mono" id="bag_name">&mdash;</span></div>
+            <div class="field"><span class="label">Size</span>
+                <span class="num" id="bag_size">&mdash;</span></div>
+        </div>
+        <div class="hint">
+            Recording starts with the stack. Bags have no <code>metadata.yaml</code> after a
+            power cut &mdash; run <code>ros2 bag reindex &lt;dir&gt; -s mcap</code> first.
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="panel-head"><span class="panel-title">Simulation safety bypass</span></div>
+        <button class="toggle" id="toggle_simulation" aria-pressed="false">
+            <span class="toggle-dot"></span>Relax hardware preconditions
+        </button>
+        <div class="hint warn">
+            Relaxes the supervisor's kill-switch and thruster checks so the stack can arm
+            without hardware. Never leave this on for an in-water run.
+        </div>
+    </div>
+
+</div>
+</section>
+
+</main>
+</div>
+
+<div class="toast-stack" id="toast_stack"></div>
+
+<div class="modal-backdrop" id="confirm_modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm_title">
+        <div class="modal-title" id="confirm_title">Confirm</div>
+        <div class="modal-body" id="confirm_body"></div>
+        <div class="modal-actions">
+            <button id="confirm_cancel">Cancel</button>
+            <button class="danger" id="confirm_ok">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/shared/protocol.js"></script>
+<script src="/static/shared/ws.js"></script>
+<script src="/static/shared/keyboard_control.js"></script>
+<script src="/static/dashboard/main.js"></script>
 </body>
 </html>

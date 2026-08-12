@@ -32,6 +32,9 @@
     # 取值依據：垂直軸有 4 顆推進器，單顆上限 15 N（見 hardware.yaml），
     # 所以 z 軸總出力上限約 60 N；積分項給總量的一半。
     integral_limit: 30.0
+    # 注意：這只箝住 PID 自己的輸出。depth_force_bias_N 是在下游的
+    # output_sink_force_to_output_wrench_node 才加上去的，真正上匯流排的
+    # force.z 由那裡的 max_sink_force_N 負責守住 60 N 的總量。
     output_limit: 60.0
 
     # 開機讀
@@ -42,6 +45,11 @@
   ros__parameters:
     # 熱調。抵銷淨浮力用的常數偏壓，正值向下。
     depth_force_bias_N: 10.0
+    # 垂直軸總出力上限：4 顆 × 15 N（見 hardware.yaml）。偏壓加完之後才箝，
+    # 這樣 PID 飽和時 force.z 不會變成 60 + 10 = 70 N。70 N 分到四顆是
+    # 17.5 N，超過單顆上限，saturation_mode: scale 會把八顆一起縮 14%，
+    # 自主端的前進與轉向在最需要修正的瞬間被靜默削弱。
+    max_sink_force_N: 60.0
     # 是否依 IMU 姿態把下沉力轉到載具座標系。false 時直接當作 +z。
     use_sink_force_direction: false
 

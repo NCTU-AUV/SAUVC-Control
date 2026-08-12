@@ -121,6 +121,46 @@ class SupervisorNode(Node):
         del msg
         self._safety.update_decision()
 
+    def _reject(self, response, reason: str):
+        """拒絕一次模式請求，不改動載具狀態。
+
+        「我想啟用的來源還沒就緒」是請求層級的前提不滿足，不是載具故障。
+        原本這裡呼叫 _enter_fault，於是在水中穩定保持深度時、只要在 Jetson
+        發出第一筆 wrench 之前勾選自主，就會清掉所有控制群組、停用深度 PID
+        並輸出零力 —— 載具因為一次「應該被回絕的請求」而失去深度保持。
+
+        已啟用的模式若之後才失去前提，由 _check_active_mode_safety 週期性
+        偵測並進入 FAULT；kill 開關與推進器停用也各自有獨立的 callback。
+        這裡不需要、也不應該重複那件事。
+        """
+        self.get_logger().warning(f"Mode request rejected: {reason}")
+        response.success = False
+        response.message = reason
+        return response
+
+    def _fault_latched(self):
+        """FAULT 中的「啟用」請求要擋的理由，不在 FAULT 則回 None。
+
+        必須在服務處理器的**最前面**呼叫。_refresh_mode_from_active_groups
+        尾端也有一道 FAULT 鎖存，但那一道是給 disable 路徑用的：它要到
+        _set_depth_hold／_set_autonomous 已經 _enable_group、已經把群組加進
+        _active_controller_groups 之後才生效，於是深度 PID 被拉回 ACTIVE
+        （正是 _enter_fault 的 disable_all 要防止的事）、_activate_wrench_sum
+        卻永遠不會執行，推力全程為零 —— 而服務仍回報 success=True。
+
+        擋不住的原因是 safety_monitor 的三個 ready 檢查（safety_ready／
+        depth_ready／decision_ready）完全不看 _mode，kill 開關放開之後它們
+        就全數通過。_check_active_mode_safety 是以群組集合為判準、不是 _mode，
+        所以也不會修正這個矛盾。
+
+        FAULT 只能由操作員明確地經 SAFE_DISABLED 或 MANUAL 清除 —— 那兩條
+        路徑直接呼叫 _set_mode，因此不受這道閘門限制。
+        """
+        if self._mode != ControlMode.FAULT:
+            return None
+        return (f"Vehicle is in FAULT ({self._status}); "
+                "clear it with SAFE_DISABLED or MANUAL first")
+
     def _set_safe_disabled(self, request, response):
         self._set_mode(ControlMode.SAFE_DISABLED, "Operator requested SAFE_DISABLED")
         response.success = True
@@ -130,10 +170,7 @@ class SupervisorNode(Node):
     def _set_manual(self, request, response):
         ok, reason = self._safety_ready()
         if not ok:
-            self._enter_fault(reason)
-            response.success = False
-            response.message = reason
-            return response
+            return self._reject(response, reason)
 
         self._set_mode(ControlMode.MANUAL, "Operator requested MANUAL")
         response.success = True
@@ -141,14 +178,15 @@ class SupervisorNode(Node):
         return response
 
     def _set_depth_hold(self, request, response):
+        fault_reason = self._fault_latched()
+        if fault_reason:
+            return self._reject(response, fault_reason)
+
         ok, reason = self._safety_ready()
         if ok:
             ok, reason = self._depth_ready()
         if not ok:
-            self._enter_fault(reason)
-            response.success = False
-            response.message = reason
-            return response
+            return self._reject(response, reason)
 
         if "depth_control" not in self._active_controller_groups:
             self._reset_group("depth_control")
@@ -168,14 +206,15 @@ class SupervisorNode(Node):
         return response
 
     def _set_autonomous(self, request, response):
+        fault_reason = self._fault_latched()
+        if fault_reason:
+            return self._reject(response, fault_reason)
+
         ok, reason = self._safety_ready()
         if ok:
             ok, reason = self._decision_ready()
         if not ok:
-            self._enter_fault(reason)
-            response.success = False
-            response.message = reason
-            return response
+            return self._reject(response, reason)
 
         self._active_controller_groups.add(self._autonomous_group)
         self._refresh_mode_from_active_groups()
@@ -221,6 +260,22 @@ class SupervisorNode(Node):
         self._deactivate_wrench_sum()
 
     def _refresh_mode_from_active_groups(self):
+        # FAULT 是鎖存狀態，只能由操作員明確地經 SAFE_DISABLED 或 MANUAL 清除
+        # （那兩條路徑會直接呼叫 _set_mode）。原本這個函式的 else 分支會無條件
+        # 把模式覆寫成 SAFE_DISABLED、狀態覆寫成「No controller groups active」，
+        # 所以操作員在 FAULT 下按任一個 disable 鍵，就會在沒有任何安全複檢的
+        # 情況下解除 FAULT，並且銷毀故障原因 —— 事後的 bag 與儀表板都失去
+        # 載具為何停機的唯一記錄。
+        #
+        # 這一道只負責 disable 路徑（_disable_depth_hold／_disable_autonomous）。
+        # 「啟用」路徑必須更早擋 —— 走到這裡時它們已經改過群組並轉換過生命週期，
+        # 光是不覆寫模式救不了，見 _fault_latched。
+        if self._mode == ControlMode.FAULT:
+            self.get_logger().warning(
+                "Controller group changed while in FAULT; keeping FAULT "
+                f"(reason: {self._status})")
+            return
+
         depth_active = "depth_control" in self._active_controller_groups
         autonomous_active = self._autonomous_group in self._active_controller_groups
 

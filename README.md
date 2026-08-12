@@ -9,39 +9,49 @@
 ## 這個 repo 負責什麼
 
 ```text
-      SAUVC-JETSON（另一個 container）
-      感知 → BehaviorTree 決策
-              │
-              │  control/wrench_sources/decision   (Wrench, 50 Hz)
-              │  control/targets/depth_m           (Float64)
-              ▼
-  ┌───────────────────────────────────────────────────────────┐
-  │  本 repo                                                   │
-  │                                                            │
-  │  STM32 ──► sensors ──► state/depth_m ──► 深度 PID ──┐      │
-  │  (壓力/IMU)                                          │      │
-  │                                                      ▼      │
-  │  GUI 手動 ──────────────────► control/wrench_sources/*      │
-  │  Autonomy 決策 ─────────────►        │                      │
-  │                                       ▼                     │
-  │                                  wrench_sum                 │
-  │                                       │ control/wrench_command
-  │                                       ▼                     │
-  │                          推力分配（偽逆 + 飽和限幅）         │
-  │                                       │                     │
-  │                        ┌──────────────┴──────────────┐      │
-  │                        ▼                             ▼      │
-  │                  力→PWM→STM32                  ros_gz_bridge│
-  │                    （實機）                       （模擬）   │
-  └───────────────────────────────────────────────────────────┘
+   SAUVC-JETSON  (separate container)
+   perception -> BehaviorTree decision
+            |
+            |  control/wrench_sources/decision  (Wrench, 50 Hz)
+            |  control/targets/depth_m          (Float64)
+            v
++-----------------------------------------------------------------------+
+| this repo                                                             |
+|                                                                       |
+|  STM32 ------> sensors ------> state/depth_m ------> depth PID        |
+|  (pressure/IMU)                                          |            |
+|                                                          v            |
+|  GUI manual -----------------------> control/wrench_sources/*         |
+|  autonomy decision ----------------->        |                        |
+|                                              v                        |
+|                                         wrench_sum                    |
+|                                              |  control/wrench_command|
+|                                              v                        |
+|                   thrust allocation (pseudo-inverse + clamp)          |
+|                                              |                        |
+|                        +---------------------+---------------------+  |
+|                        v                                           v  |
+|               force -> PWM -> STM32                     ros_gz_bridge |
+|                   (hardware)                              (simulation)|
++-----------------------------------------------------------------------+
 ```
 
 核心設計是 **wrench 匯流排**：所有「想讓載具動」的來源（深度 PID、GUI 手動、
 Autonomy 決策）都只做一件事 —— 發布一個 `geometry_msgs/Wrench` 到自己專屬的
 `control/wrench_sources/*`。新增控制行為只要多發一個 topic 並在設定裡加一行，
-不用碰任何下游程式碼。細節見 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+不用碰任何下游程式碼。細節見 [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html)。
 
 ## 取得
+
+**平常不用直接開這個 repo。** 從 [super-repo](https://github.com/NCTU-AUV/SAUVC)
+一個指令就會把這個堆疊連同感知決策與模擬一起拉起來：
+
+```shell
+cd ../          # SAUVC super-repo
+make up && make build && make launch
+```
+
+底下是單獨開發本 repo 時用的流程。
 
 ```shell
 git clone https://github.com/NCTU-AUV/SAUVC-RPI.git
@@ -141,6 +151,10 @@ ros2 service call /orca_auv/system_manager/set_mode/safe_disabled std_srvs/srv/T
 任何一個安全前提被打破 —— kill switch 觸發、深度感測器逾時、
 Autonomy 的 decision wrench 逾時 —— 都會立刻進 `FAULT` 並停掉所有輸出。
 
+**FAULT 是鎖存狀態。** 在 FAULT 中呼叫 `depth_hold` 或 `autonomous` 會被回絕
+（`success=False`，訊息帶著故障原因），控制器狀態完全不會被改動。
+要恢復必須先明確地經 `safe_disabled` 或 `manual` 清除 FAULT，這是唯一的出口。
+
 ## Bag 錄製
 
 隨啟動自動開始錄（比賽時沒有人會記得按錄影），要關就 `record:=false`。
@@ -174,6 +188,8 @@ rpi_ros2_ws/src/
 
 ## 相關文件
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 系統怎麼運作
+- [docs/ARCHITECTURE.html](docs/ARCHITECTURE.html) —— 系統怎麼運作
+- [../docs/HANDOFF.md](../docs/HANDOFF.md) —— 座標慣例、已知缺陷、驗收方式
+- [../README.md](../README.md) —— super-repo：一次啟動整套系統
 - [../docs/REFACTOR_PLAN.md](../docs/REFACTOR_PLAN.md) —— 重構計畫與決策紀錄
 - [../docs/SIMULATION_FINDINGS.md](../docs/SIMULATION_FINDINGS.md) —— 三容器全鏈路實測報告
