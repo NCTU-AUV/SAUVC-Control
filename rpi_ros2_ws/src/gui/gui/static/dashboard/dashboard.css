@@ -158,7 +158,7 @@ main { padding: 16px; flex: 1; }
 
 .camera-thumbs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 10px;
 }
 .camera-thumb {
@@ -315,6 +315,7 @@ main { padding: 16px; flex: 1; }
     }
 }
 @media (max-width: 640px) {
+    .camera-thumbs { grid-template-columns: 1fr 1fr; }
     .topbar { height: auto; flex-wrap: wrap; padding: 10px 12px; gap: 12px; }
     main { padding: 12px; }
     .grid-3 { grid-template-columns: 1fr 1fr; }

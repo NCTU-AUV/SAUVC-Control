@@ -217,15 +217,37 @@ $("kb_depth_step_input").addEventListener("change", (e) => {
 // "Invalid topic name" and return an empty multipart body — a stream that
 // connects and then shows nothing. Topic names only ever contain slashes,
 // alphanumerics and underscores, all of which are safe here unescaped.
-function streamUrl(topic) {
+function cameraUrl(source, endpoint) {
+    const extra = source.params ? `&${source.params}` : "";
     return `http://${window.location.hostname}:${state.cameraPort}`
-        + `/stream?topic=${topic}`;
+        + `/${endpoint}?topic=${source.topic}${extra}`;
 }
 
-// Availability comes from the backend, which checks the ROS graph. The browser
-// cannot work it out for itself: an <img> pointed at an MJPEG stream fires
-// neither load nor error dependably, because the response is an endless
-// multipart body rather than one image.
+// Only the main view holds a live MJPEG connection. Thumbnails poll /snapshot
+// once a second instead.
+//
+// Four simultaneous MJPEG streams do not survive: they are four long-lived
+// connections, and in practice only two ever delivered frames — the rest sat
+// at 200 OK with nothing arriving, for 40 s and counting. Polling also costs a
+// fraction of the bandwidth, which matters on a laptop at the poolside, and a
+// thumbnail exists to answer "which channel do I want to look at", for which
+// 1 Hz is plenty.
+const THUMB_REFRESH_MS = 1000;
+let thumbTimer = null;
+
+function refreshThumbs() {
+    for (const img of document.querySelectorAll(".camera-thumb img")) {
+        const base = img.dataset.base;
+        if (base) {
+            img.src = `${base}&_=${Date.now()}`;
+        }
+    }
+}
+
+// Availability comes from the backend, which checks the ROS graph for a
+// publisher. The browser cannot work it out for itself: an <img> pointed at an
+// MJPEG stream fires neither load nor error dependably, because the response is
+// an endless multipart body rather than one image.
 function renderCameras() {
     if (!state.cameras.length) return;
     if (!state.cameras.some((c) => c.id === state.mainCameraId)) {
@@ -236,7 +258,7 @@ function renderCameras() {
     const mainImg = $("camera_main_img");
     $("camera_main_label").textContent = main.label;
     $("camera_main_empty").hidden = main.available;
-    const mainUrl = main.available ? streamUrl(main.topic) : "";
+    const mainUrl = main.available ? cameraUrl(main, "stream") : "";
     // Only reassign when it actually changed, or the stream restarts on every
     // refresh and the picture visibly stutters.
     if (mainImg.getAttribute("src") !== mainUrl) {
@@ -246,7 +268,8 @@ function renderCameras() {
 
     const thumbs = $("camera_thumbs");
     const wanted = state.cameras.filter((c) => c.id !== main.id);
-    const signature = wanted.map((c) => `${c.id}:${c.topic}:${c.available}`).join("|");
+    const signature = wanted
+        .map((c) => `${c.id}:${c.topic}:${c.available}:${c.params}`).join("|");
     if (thumbs.dataset.signature === signature) return;
     thumbs.dataset.signature = signature;
     thumbs.innerHTML = "";
@@ -258,7 +281,8 @@ function renderCameras() {
         if (source.available) {
             const img = document.createElement("img");
             img.alt = source.label;
-            img.src = streamUrl(source.topic);
+            img.dataset.base = cameraUrl(source, "snapshot");
+            img.src = img.dataset.base;
             button.appendChild(img);
         } else {
             const empty = document.createElement("div");
@@ -275,6 +299,10 @@ function renderCameras() {
             renderCameras();
         });
         thumbs.appendChild(button);
+    }
+
+    if (thumbTimer === null) {
+        thumbTimer = window.setInterval(refreshThumbs, THUMB_REFRESH_MS);
     }
 }
 
@@ -558,5 +586,15 @@ $("button_clear_log").addEventListener("click", () => {
 
 // ----------------------------------------------------------------------- go
 
-applyMode(null);
+// Connect even if the initial paint throws. An exception on the way down this
+// file used to take the websocket with it: the page rendered, every readout sat
+// at its placeholder, and the only clue was "Link down" — which reads as a
+// server problem rather than a bug three lines earlier in the browser.
+try {
+    applyMode(null);
+} catch (error) {
+    console.error("gui: initial render failed", error);
+    toast("GUI error", String(error && error.message || error), "crit");
+}
+
 socket.connect();
