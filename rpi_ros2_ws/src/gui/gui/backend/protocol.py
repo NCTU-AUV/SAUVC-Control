@@ -88,10 +88,23 @@ TOPIC_BAG_STATUS = "gui/bag_status"
 # simulator, so the browser must not hardcode them — it receives the list on
 # connect and only builds web_video_server URLs from it.
 TOPIC_CAMERA_SOURCES = "gui/camera_sources"
-# NOTE: mission *state* is deliberately absent. /orca/decision/status carries
-# orca_interface/msg/DecisionStatus, and orca_interface is a SAUVC-JETSON
-# package that is not built into the control container — this node cannot
-# deserialise it. Starting a mission works because that topic is std_msgs/Bool.
+# BehaviorTree state: which node is ticking, what it is chasing, its own debug
+# line. Relayed from ROS_TOPIC_MISSION_STATUS_JSON below, already decoded, so
+# the browser receives an object rather than a string it has to parse again.
+TOPIC_MISSION_STATUS = "decision/status"
+
+# --- cross-stack ROS topics (absolute, outside this vehicle's namespace) -----
+# The decision node runs in the autonomy container under a fixed /orca prefix.
+# Both stacks share one ROS graph, so subscribing across works; what does not
+# work is the message type. /orca/decision/status carries
+# orca_interface/msg/DecisionStatus and orca_interface is a SAUVC-JETSON package
+# that is not built into the control container, so this node cannot deserialise
+# it — which is why mission state used to be missing from the GUI entirely.
+# decision_node therefore mirrors the same fields as JSON in a std_msgs/String,
+# a type every container already has. Starting a mission has always worked for
+# the same reason: std_msgs/Bool.
+ROS_TOPIC_MISSION_STATUS_JSON = "/orca/decision/status_json"
+ROS_TOPIC_START_MISSION = "/orca/decision/start_mission"
 
 
 def topic_payload(topic_name, msg):

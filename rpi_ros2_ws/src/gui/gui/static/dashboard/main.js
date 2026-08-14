@@ -24,6 +24,7 @@ const state = {
     cameras: [],
     cameraPort: 8080,
     mainCameraId: null,
+    mission: null,
 };
 
 // ---------------------------------------------------------------- formatting
@@ -306,6 +307,64 @@ function renderCameras() {
     }
 }
 
+// ------------------------------------------------------------------- mission
+//
+// The BehaviorTree lives in the autonomy container and its own status message
+// is an orca_interface type this stack cannot deserialise, so the decision node
+// mirrors the same fields as JSON and gui_node relays them. Rendered from a
+// single function because two things drive the panel — the arriving message and
+// the staleness clock — and letting them write it independently made the pill
+// flicker between the last known action and "offline".
+
+const MISSION_STALE_MS = 3000;   // the mirror runs at 5 Hz
+
+const MISSION_FIELDS = [
+    "mission_action", "mission_target", "mission_phase",
+    "mission_camera", "mission_time", "mission_debug",
+];
+
+function renderMission() {
+    const status = state.mission;
+    // Never-seen counts as offline: the autonomy container takes minutes to
+    // come up (TensorRT rebuilds its engine on a cold start), so "not there
+    // yet" is the normal state for a while and must not read as "idle".
+    const offline =
+        socket.isStale(protocol.topics.missionStatus, MISSION_STALE_MS);
+
+    if (offline || !status) {
+        setPill("mission_pill", "offline", "");
+        for (const id of MISSION_FIELDS) $(id).textContent = "—";
+        return;
+    }
+
+    const failed = status.current_action === "MissionFailed";
+    if (status.mission_started) {
+        // is_recovering means AvoidObstacle has taken the tree over. Worth its
+        // own tone: the vehicle is moving on a command nobody chose.
+        setPill("mission_pill", status.is_recovering ? "avoiding" : "running",
+            status.is_recovering ? "warn" : "ok");
+    } else if (status.mission_complete) {
+        setPill("mission_pill", failed ? "failed" : "complete",
+            failed ? "crit" : "ok");
+    } else {
+        setPill("mission_pill", "idle", "");
+    }
+
+    $("mission_action").textContent = status.current_action || "—";
+    $("mission_target").textContent = status.target_label
+        ? `${status.target_label} · ${status.target_locked ? "locked" : "no lock"}`
+        : "—";
+    $("mission_phase").textContent = status.mission_phase || "—";
+    $("mission_camera").textContent = status.camera_mode || "—";
+    // The decision node zeroes mission_time the moment the tree stops, so
+    // between runs the other readouts hold the last state the tree was in
+    // while this one would read a flat 0.0 s next to them. A dash says
+    // "not running" instead of asserting a duration that is not one.
+    $("mission_time").textContent = status.mission_started
+        ? `${fmt(status.mission_time, 1)} s` : "—";
+    $("mission_debug").textContent = status.debug || "—";
+}
+
 // -------------------------------------------------------------- thruster grid
 
 const THRUSTER_ORDER = [4, 5, 0, 1, 2, 3, 6, 7];
@@ -415,6 +474,11 @@ socket.onTopic(protocol.topics.bagStatus, (status) => {
         status?.free_gb == null ? "—" : `${status.free_gb} GB`;
 });
 
+socket.onTopic(protocol.topics.missionStatus, (status) => {
+    state.mission = status ?? null;
+    renderMission();
+});
+
 socket.onTopic(protocol.topics.cameraSources, (payload) => {
     state.cameraPort = payload?.port ?? 8080;
     state.cameras = payload?.sources ?? [];
@@ -442,8 +506,12 @@ socket.onConnectionChange((connected) => {
         connected ? "ok" : "crit");
     if (!connected) {
         // Values on screen are now history. Say so rather than letting them
-        // sit there looking current.
+        // sit there looking current. The mission panel is cleared outright
+        // rather than left to time out, so a dropped link never leaves a
+        // "running" pill on screen for three more seconds.
         applyMode(null);
+        state.mission = null;
+        renderMission();
     }
 });
 
@@ -457,6 +525,9 @@ window.setInterval(() => {
     for (const [id, topic] of marks) {
         $(id)?.classList.toggle("is-stale", socket.isStale(topic, STALE_MS[topic]));
     }
+    // Re-run rather than mark: the mission panel drops to "offline" and blanks
+    // its readouts, which is clearer than five separate stale badges.
+    renderMission();
 }, 500);
 
 // --------------------------------------------------------------------- actions
@@ -592,6 +663,7 @@ $("button_clear_log").addEventListener("click", () => {
 // server problem rather than a bug three lines earlier in the browser.
 try {
     applyMode(null);
+    renderMission();
 } catch (error) {
     console.error("gui: initial render failed", error);
     toast("GUI error", String(error && error.message || error), "crit");

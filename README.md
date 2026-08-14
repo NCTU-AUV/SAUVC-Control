@@ -68,6 +68,12 @@ make launch    # 實機啟動
 
 GUI：<http://localhost>（從別台機器則是 `http://<載具 IP>`）
 
+GUI 的 Mission 面板會顯示 autonomy 堆疊行為樹的即時狀態。資料來自
+`/orca/decision/status_json`——那是 `DecisionStatus` 的 JSON 鏡像，因為
+`orca_interface` 沒有 build 進這個容器，原本的訊息型別在這裡反序列化不了。
+面板顯示 `offline` 就是那條 topic 沒進來（autonomy 容器沒起來，或還在
+重建 TensorRT engine），不是任務閒置。
+
 ### 模擬
 
 需要另外跑起 [SAUVC-Simulation](https://github.com/NCTU-AUV/SAUVC-Simulation)

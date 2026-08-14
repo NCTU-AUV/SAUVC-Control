@@ -98,10 +98,31 @@
 
         <!-- ---- mission ---- -->
         <div class="panel">
-            <div class="panel-head"><span class="panel-title">Mission</span></div>
+            <div class="panel-head">
+                <span class="panel-title">Mission</span>
+                <span class="pill" id="mission_pill">&mdash;</span>
+            </div>
             <div class="field-row">
                 <button class="primary" id="button_start_mission">Start</button>
                 <button class="danger" id="button_stop_mission">Stop</button>
+            </div>
+            <div class="grid-2">
+                <div class="field"><span class="label">Action</span>
+                    <span class="mono" id="mission_action">&mdash;</span></div>
+                <div class="field"><span class="label">Target</span>
+                    <span class="mono" id="mission_target">&mdash;</span></div>
+                <div class="field"><span class="label">Tree</span>
+                    <span class="mono" id="mission_phase">&mdash;</span></div>
+                <!-- Which camera the tree selected. Depth is only estimated in
+                     realsense mode, so this says whether any distance the tree
+                     is acting on can be real. -->
+                <div class="field"><span class="label">Camera</span>
+                    <span class="mono" id="mission_camera">&mdash;</span></div>
+                <div class="field"><span class="label">Elapsed</span>
+                    <span class="num" id="mission_time">&mdash;</span></div>
+                <div class="field" style="grid-column: 1 / -1;">
+                    <span class="label">Node status</span>
+                    <span class="mono" id="mission_debug">&mdash;</span></div>
             </div>
             <div class="hint">
                 The BehaviorTree runs in the autonomy container and does not see

@@ -123,6 +123,14 @@ class GUINode(Node):
                 callback=self._supervisor_status_callback,
                 qos_profile=10
             )
+        # Absolute, and in the autonomy container's /orca prefix rather than
+        # this vehicle's namespace — see the note on the constant.
+        self._mission_status_subscriber = self.create_subscription(
+                msg_type=String,
+                topic=protocol.ROS_TOPIC_MISSION_STATUS_JSON,
+                callback=self._mission_status_callback,
+                qos_profile=10
+            )
         self._initialize_all_thrusters_client = self.create_client(
             Trigger,
             'thrusters/initialize_all',
@@ -237,6 +245,9 @@ class GUINode(Node):
         self.declare_parameter("camera_front_topic", "/orca/color/image_raw")
         self.declare_parameter("camera_detections_topic", "/yolov8_processed_image")
         self.declare_parameter("camera_bottom_topic", "/orca/usb_cam/image_raw")
+        self.declare_parameter("camera_depth_topic",
+                               "/orca/aligned_depth_to_color/image_raw")
+        self.declare_parameter("camera_sim_depth_topic", f"/{ns}/depth/image_raw")
         self.declare_parameter("camera_sim_front_topic", f"/{ns}/color/image_raw")
         self.declare_parameter("camera_sim_bottom_topic", f"/{ns}/camera/bottom/image_raw")
         self.declare_parameter("web_video_server_port", 8080)
@@ -253,10 +264,14 @@ class GUINode(Node):
         # up, so a list sent once at connect would leave the detection view
         # permanently marked unavailable.
         self._camera_timer = self.create_timer(5.0, self._publish_camera_sources)
+        # Last topic each source resolved to, plus how many polls in a row it
+        # has been missing. Resolution is sticky — see _publish_camera_sources.
+        self._camera_resolved = {}
+        self._camera_missing = {}
 
         self._start_mission_publisher = self.create_publisher(
             Bool,
-            "/orca/decision/start_mission",
+            protocol.ROS_TOPIC_START_MISSION,
             10,
         )
         self._last_mode = None
@@ -347,23 +362,77 @@ class GUINode(Node):
              ["camera_detections_topic"]),
             ("bottom", "Bottom camera",
              ["camera_bottom_topic", "camera_sim_bottom_topic"]),
+            ("depth", "Depth",
+             ["camera_depth_topic", "camera_sim_depth_topic"]),
         ]
+        # Depth frames are 32FC1 metres, not 8-bit. web_video_server will scale
+        # them for you, but left to itself it picks the range per frame, so the
+        # picture brightens and darkens as the scene changes and the shade of a
+        # given surface stops meaning a given distance. Pin the window instead:
+        # 0-10 m covers the pool with the depth camera's 20 m far clip beyond it.
+        stream_params = {"depth": "min_image_value=0&max_image_value=10"}
 
         # Resolve against the live graph here rather than letting the browser
         # probe. An <img> pointed at an MJPEG stream never fires load or error
         # reliably — the response is an endless multipart body — so a frontend
         # fallback cannot tell "no publisher" from "first frame still coming".
         # This node already knows which topics exist.
-        live = {name for name, _ in self.get_topic_names_and_types()}
+        # Existence in the graph is not enough — it has to have a *publisher*.
+        # web_video_server creates a subscription for whatever topic it is
+        # asked for, so a stream request for a topic nobody publishes makes
+        # that topic appear in `get_topic_names_and_types()` from then on. The
+        # resolver then sees it as available and keeps picking it: asking for
+        # the wrong topic once is enough to lock the answer to it forever.
+        def has_publisher(topic: str) -> bool:
+            try:
+                return len(self.get_publishers_info_by_topic(topic)) > 0
+            except Exception:                                 # noqa: BLE001
+                # Raised for a name that has never existed at all.
+                return False
         sources = []
         for source_id, label, param_names in candidates:
             topics = [self._param_str(name) for name in param_names]
-            resolved = next((t for t in topics if t in live), None)
+            previous = self._camera_resolved.get(source_id)
+
+            # Sticky resolution. This runs every few seconds, and changing the
+            # answer rewrites the browser's <img> src, which tears down a
+            # working MJPEG connection and opens a new one. A restart of the
+            # control stack briefly empties the graph, so a naive re-resolve
+            # flips every source to the real-robot fallback mid-run and the
+            # whole camera panel goes blank — observed as four 200s followed by
+            # four ERR_CONNECTION_REFUSED on the other topic set.
+            #
+            # Keep the current answer while it is still live; only look again
+            # once it has been absent for several consecutive polls.
+            if previous is not None and has_publisher(previous):
+                self._camera_missing[source_id] = 0
+                resolved = previous
+            else:
+                missing = self._camera_missing.get(source_id, 0) + 1
+                self._camera_missing[source_id] = missing
+                if previous is not None and missing < 3:
+                    # Probably a restart, not a reconfiguration. Hold the
+                    # existing answer and mark it unavailable for now.
+                    resolved = None
+                    self._camera_resolved[source_id] = previous
+                    sources.append({
+                        "id": source_id,
+                        "label": label,
+                        "topic": previous,
+                        "available": False,
+                        "params": stream_params.get(source_id, ""),
+                    })
+                    continue
+                resolved = next((t for t in topics if has_publisher(t)), None)
+
+            if resolved is not None:
+                self._camera_resolved[source_id] = resolved
             sources.append({
                 "id": source_id,
                 "label": label,
-                "topic": resolved or topics[0],
+                "topic": resolved or previous or topics[0],
                 "available": resolved is not None,
+                "params": stream_params.get(source_id, ""),
             })
 
         self.aiohttp_server.send_topic(
@@ -417,6 +486,25 @@ class GUINode(Node):
 
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
+
+    def _mission_status_callback(self, msg: String):
+        """Relay the decision node's JSON status mirror to the browser.
+
+        Decoded here rather than passed through as a string so a malformed
+        frame is dropped at the one place that can log about it, instead of
+        reaching the page and throwing inside a topic handler.
+        """
+        try:
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning(
+                f"Unparsable decision status JSON: {msg.data[:200]}")
+            return
+        if not isinstance(status, dict):
+            self.get_logger().warning(
+                f"Decision status JSON is not an object: {msg.data[:200]}")
+            return
+        self.aiohttp_server.send_topic(protocol.TOPIC_MISSION_STATUS, status)
 
     def _request_pid_params(self):
         for group_key, group_spec in self._pid_param_groups.items():

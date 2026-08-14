@@ -55,6 +55,9 @@ const GuiProtocol = Object.freeze({
         serviceResult: "gui/service_result",
         bagStatus: "gui/bag_status",
         cameraSources: "gui/camera_sources",
+        // BehaviorTree state, relayed from the autonomy container's JSON
+        // mirror of DecisionStatus. Arrives already decoded as an object.
+        missionStatus: "decision/status",
     }),
     // Vehicle modes as reported by system_manager/mode.
     modes: Object.freeze({
