@@ -74,11 +74,52 @@ absolute_topics:
   - /orca/decision/camera_mode
 
 # -----------------------------------------------------------------------------
-# 影像 topic：預設不錄。
+# 影像 topic：預設不錄。用 `record_images:=true` 開啟。
 #
-# 原始影像會吃爆儲存並拖垮 I/O，在 Orin NX 上同時要跟 TensorRT 推論搶頻寬。
-# 需要時用 `record_images:=true` 開啟，且只錄 compressed。
+# 原始影像會吃爆儲存並拖垮 I/O，在 Orin NX 上同時要跟 TensorRT 推論搶頻寬，
+# 所以只錄壓縮過的。四路加起來原始約 130 MB/s、壓縮後約 13 MB/s。
+#
+# 這些名稱不是任何相機節點原本的 topic，而是 autonomy 容器裡的 republish 節點
+# 專為錄製轉出來的（見 orca_perception/launch/perception.launch.py 的
+# record_images）。這麼做有兩個理由：
+#
+#   1. **壓縮外掛只有 autonomy 容器有。** control 容器只裝了核心 image_transport，
+#      沒有 compressed_image_transport / compressed_depth_image_transport，
+#      轉不出壓縮影像。錄製端不需要外掛，它只是訂閱 CompressedImage。
+#   2. **實機與模擬的相機 topic 名稱不同**（實機在 /orca 底下，模擬在載具
+#      namespace 底下）。轉發到固定名稱之後，這份清單兩邊通用。
+#
+# 兩邊的 record_images 必須一起開：control 堆疊負責錄，autonomy 堆疊負責轉，
+# 只開一邊會錄到一組完全空的 topic。用 `make sim RECORD_IMAGES=true` 一次帶到。
+#
+# 深度**不壓縮**，直接錄原始 32FC1。
+#
+# compressedDepth 會把深度做反距離量化存成 uint16，上限寫死在 10 m（實測
+# ConfigHeader 為 depthQuantA=10100、depthQuantB=-1009，還原式
+# depth_m = A / (uint16 - B)，碼值 1 就已經對應 10.0 m，再遠會算出負數而被
+# 當成無效值丟掉），而這個 Humble build 的外掛沒有開放 depth_max 參數。
+# 10 m 以內精度極好（3 m 處誤差 0.3 mm），但池子場景遠達 16 m —— 池壁與
+# gate 後方的背景會整片變無效，而 _estimate_gate 正是靠那些背景深度做左右
+# 對稱性判斷，拿這種 bag 重跑不會重現現場行為。
+#
+# 代價很實際：640x480x4B x 30 Hz ≈ 37 MB/s，其餘三路壓縮後合計才 1.6 MB/s。
+# 開了影像錄製就是約 2.3 GB/min，錄之前先確認 ORCA_BAG_DIR 那顆碟的空間。
 # -----------------------------------------------------------------------------
+absolute_image_topics:
+  - /orca/record/front/compressed
+  - /orca/record/bottom/compressed
+  - /orca/record/detections/compressed
+  # 實機的深度來源（RealSense 對齊後的深度）。模擬沒有這條，見下面。
+  - /orca/aligned_depth_to_color/image_raw
+
+# 載具 namespace 底下的影像 topic。
+#
+# 模擬的深度掛在載具 namespace 下（/$(ns)/depth/image_raw），實機則在 /orca
+# 底下，所以兩條都列、各自放在對的清單裡，讓同一份設定在兩種情境都成立 ——
+# 沒有發布者的那條會是空的，跟 GUI 同時列出實機與模擬相機 topic 的做法一致。
+#
+# 這裡原本列的是 color/image_raw/compressed 與 camera/bottom/image_raw/compressed，
+# 但整個堆疊沒有任何節點發布過 compressed 影像，所以 record_images:=true 一直
+# 是錄到兩條空 topic（--include-unpublished-topics 讓它連錯誤都不會報）。
 image_topics:
-  - camera/bottom/image_raw/compressed
-  - color/image_raw/compressed
+  - depth/image_raw

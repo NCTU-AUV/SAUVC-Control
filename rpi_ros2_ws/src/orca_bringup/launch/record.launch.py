@@ -40,6 +40,8 @@ def _resolve_topics(config: dict, namespace: str, record_images: bool) -> list:
     topics += list(config.get('absolute_topics') or [])
     if record_images:
         topics += [f'{prefix}/{t.lstrip("/")}' for t in config.get('image_topics') or []]
+        # 影像走的是 autonomy 容器轉發出來的固定名稱，不在載具 namespace 底下。
+        topics += list(config.get('absolute_image_topics') or [])
     return topics
 
 
