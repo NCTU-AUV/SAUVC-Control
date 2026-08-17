@@ -27,6 +27,7 @@ const GuiProtocol = Object.freeze({
         setSupervisorDepthHold: "set_supervisor_depth_hold",
         safeDisable: "safe_disable",
         startMission: "start_mission",
+        stopMission: "stop_mission",
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",

@@ -280,11 +280,27 @@ class GUINode(Node):
         making the operator open a shell just to publish one Bool was the last
         step of the run that could not be done from the GUI.
         """
+        self._publish_mission_start(True)
+
+    def _stop_mission(self):
+        """End the current run without changing the vehicle mode.
+
+        decision_node's startMissionCallback clears mission_started on False,
+        which stops the tree ticking and switches its wrench publisher to a
+        constant zero. Distinct from SAFE_DISABLED on purpose: that one also
+        drops manual control and the depth PID, so it cannot be used to hand
+        the vehicle back to the operator mid-run.
+        """
+        self._publish_mission_start(False)
+
+    def _publish_mission_start(self, started: bool):
         msg = Bool()
-        msg.data = True
+        msg.data = started
         self._start_mission_publisher.publish(msg)
-        self.get_logger().info("Published start_mission")
-        self._send_service_result("start_mission", True, "Mission start published")
+        key = "start_mission" if started else "stop_mission"
+        text = "Mission start published" if started else "Mission stop published"
+        self.get_logger().info(f"Published {key}")
+        self._send_service_result(key, True, text)
 
     def _send_service_result(self, service_key: str, success: bool, message: str):
         self.aiohttp_server.send_topic(
@@ -532,6 +548,8 @@ class GUINode(Node):
                 self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
             elif action_name == protocol.ACTION_START_MISSION:
                 self._start_mission()
+            elif action_name == protocol.ACTION_STOP_MISSION:
+                self._stop_mission()
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 

@@ -33,6 +33,11 @@ ACTION_SAFE_DISABLE = "safe_disable"
 # Mission start lives in the autonomy stack. The two containers share one ROS
 # graph, so publishing it from here works and saves the operator a shell.
 ACTION_START_MISSION = "start_mission"
+# Same topic, data=False. The BehaviorTree stops ticking and decision_node
+# falls back to publishing a zero wrench, so this ends the run without
+# touching the vehicle mode — unlike SAFE_DISABLED, which also kills manual
+# control and the depth PID.
+ACTION_STOP_MISSION = "stop_mission"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
 

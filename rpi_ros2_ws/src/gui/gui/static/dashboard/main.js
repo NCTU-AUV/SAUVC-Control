@@ -475,6 +475,10 @@ $("button_start_mission").addEventListener("click", () => {
     socket.sendAction(protocol.actions.startMission);
 });
 
+$("button_stop_mission").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.stopMission);
+});
+
 $("button_magnet_on").addEventListener("click", () => {
     socket.sendTopic(protocol.topics.electromagnetEnabled, {data: true});
 });
