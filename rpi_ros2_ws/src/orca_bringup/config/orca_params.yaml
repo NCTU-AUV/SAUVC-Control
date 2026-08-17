@@ -67,6 +67,20 @@
     output_topic: control/wrench_command
     publish_rate: 30.0
     source_timeout_s: 0.5
+    # 決策來源只在自主模式下進總和。少了這道閘門，操作者切到 MANUAL 手動
+    # 駕駛時，行為樹的力矩仍然疊加在手動指令上（實際症狀：一邊前進一邊
+    # 自轉），而兩邊都沒有任何錯誤訊息。
+    #
+    # 停掉行為樹本身是另一回事 —— 那是 GUI 的 Shut down mission
+    # （/orca/decision/start_mission = false）。這裡只切斷力，讓操作者可以
+    # 中途接手再交還。
+    gated_topics:
+      - control/wrench_sources/decision
+    gate_open_modes:
+      - AUTONOMOUS
+      - AUTONOMOUS_AND_DEPTH_HOLD
+    mode_topic: system_manager/mode
+    mode_timeout_s: 1.0
 
 # --- 系統管理 -----------------------------------------------------------------
 /**/supervisor_node:
