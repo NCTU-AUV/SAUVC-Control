@@ -72,6 +72,10 @@ absolute_topics:
   - /rosout
   - /orca/decision/status
   - /orca/decision/camera_mode
+  # 行為樹的**輸入**。少了它，bag 只能回答「決策做了什麼」，回答不了
+  # 「它當時看到什麼」—— 而 distance/valid/is_stable 這三個欄位正是
+  # gate 接近失敗時唯一能分辨「沒偵測到」與「偵測到但深度被拒絕」的依據。
+  - /orca/perception_array
 
 # -----------------------------------------------------------------------------
 # 影像 topic：預設不錄。用 `record_images:=true` 開啟。
