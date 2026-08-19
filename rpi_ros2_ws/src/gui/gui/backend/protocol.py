@@ -34,6 +34,14 @@ ACTION_SAFE_DISABLE = "safe_disable"
 # graph, so publishing it from here works and saves the operator a shell.
 ACTION_START_MISSION = "start_mission"
 ACTION_STOP_MISSION = "stop_mission"
+# Bag recording. The recorder is a node in orca_bringup with its own process
+# lifecycle, so a browser reload or a gui_node restart does not interrupt a
+# run in progress — this GUI is a caller, not the owner.
+ACTION_START_RECORDING = "start_recording"
+ACTION_STOP_RECORDING = "stop_recording"
+
+RECORDER_SERVICE_START = "bag_recorder/start"
+RECORDER_SERVICE_STOP = "bag_recorder/stop"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
 
@@ -80,10 +88,12 @@ TOPIC_FLASH_STM32_STATUS = "flash_stm32_status"
 # the checkbox stayed ticked and the operator had no way to know why nothing
 # happened. Every supervisor call now reports back here.
 TOPIC_SERVICE_RESULT = "gui/service_result"
-# Bag recording has no status topic of its own (record.launch.py wraps
-# `ros2 bag record` in an ExecuteProcess), so the node derives this from the
-# graph plus the bag directory on disk.
+# Bag recording status. Now comes straight from the bag_recorder node
+# (bag_recorder/status, a JSON String) rather than being guessed from the ROS
+# graph plus a directory listing — the recorder knows things the graph cannot
+# show, notably whether this run includes images and why a start was refused.
 TOPIC_BAG_STATUS = "gui/bag_status"
+ROS_TOPIC_RECORDER_STATUS = "bag_recorder/status"
 # Camera stream descriptors. The topics differ between the real robot and the
 # simulator, so the browser must not hardcode them — it receives the list on
 # connect and only builds web_video_server URLs from it.

@@ -12,6 +12,9 @@
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
 
   <!-- 被本 package 的 launch 檔啟動的節點 -->
   <exec_depend>control</exec_depend>

@@ -131,6 +131,36 @@
             </div>
         </div>
 
+        <!-- ---- recording ---- -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Recording</span>
+                <span class="pill" id="rec_pill">&mdash;</span>
+            </div>
+            <div class="field-row">
+                <button class="primary" id="button_start_recording">Record</button>
+                <button class="danger" id="button_stop_recording">Stop</button>
+                <label class="field" style="flex-direction: row; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="rec_images_input">
+                    <span class="label" style="margin: 0;">含影像</span>
+                </label>
+            </div>
+            <div class="grid-2">
+                <div class="field"><span class="label">Elapsed</span>
+                    <span class="num" id="rec_elapsed">&mdash;</span></div>
+                <div class="field"><span class="label">Size</span>
+                    <span class="num" id="rec_size">&mdash;</span></div>
+                <div class="field"><span class="label">Free disk</span>
+                    <span class="num" id="rec_free">&mdash;</span></div>
+                <div class="field"><span class="label">Topics</span>
+                    <span class="num" id="rec_topics">&mdash;</span></div>
+            </div>
+            <div class="hint" id="rec_hint">
+                含影像約 38 MB/s（2.3 GB/min），其中 37 MB/s 是原始深度；
+                不含影像約 0.1 MB/s。錄製不會自動停 &mdash; 注意剩餘空間。
+            </div>
+        </div>
+
         <!-- ---- ball electromagnet ---- -->
         <div class="panel">
             <div class="panel-head">

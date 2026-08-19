@@ -465,6 +465,8 @@ socket.onTopic(protocol.topics.serviceResult, (result) => {
 
 socket.onTopic(protocol.topics.bagStatus, (status) => {
     const recording = status?.recording === true;
+    const images = status?.include_images === true;
+
     setPill("bag_pill", recording ? "Bag REC" : "Bag idle", recording ? "ok" : "");
     $("bag_state").textContent = recording ? "recording" : "not running";
     $("bag_name").textContent = status?.bag_name ?? "—";
@@ -472,6 +474,47 @@ socket.onTopic(protocol.topics.bagStatus, (status) => {
         status?.size_mb == null ? "—" : `${status.size_mb} MB`;
     $("bag_free").textContent =
         status?.free_gb == null ? "—" : `${status.free_gb} GB`;
+
+    // ---- Flight-tab controls ----
+    setPill("rec_pill", recording ? (images ? "REC + 影像" : "REC") : "idle",
+        recording ? (images ? "warn" : "ok") : "");
+    $("rec_elapsed").textContent =
+        status?.elapsed_s == null ? "—" : `${status.elapsed_s} s`;
+    $("rec_size").textContent =
+        status?.size_mb == null ? "—" : `${status.size_mb} MB`;
+    $("rec_free").textContent =
+        status?.free_gb == null ? "—" : `${status.free_gb} GB`;
+    $("rec_topics").textContent = status?.topic_count || "—";
+
+    // The checkbox is a request for the *next* run, so it must not be
+    // overwritten while the operator is setting it up. Once recording starts it
+    // reflects what is actually being recorded, because at that point it is a
+    // readout rather than a control.
+    const box = $("rec_images_input");
+    if (recording) {
+        box.checked = images;
+        box.disabled = true;
+    } else {
+        box.disabled = false;
+    }
+
+    // Free disk is the only thing standing between a long run and a full root
+    // partition — nothing stops recording automatically, by choice.
+    const free = Number(status?.free_gb);
+    const low = Number.isFinite(free) && free < 10;
+    $("rec_free").classList.toggle("is-stale", false);
+    $("rec_hint").className = low ? "hint warn" : "hint";
+    if (low && recording) {
+        $("rec_hint").textContent =
+            `剩餘 ${free} GB。含影像時每分鐘吃掉 2.3 GB，錄製不會自動停。`;
+    } else if (status?.error) {
+        $("rec_hint").className = "hint warn";
+        $("rec_hint").textContent = status.error;
+    } else {
+        $("rec_hint").textContent =
+            "含影像約 38 MB/s（2.3 GB/min），其中 37 MB/s 是原始深度；"
+            + "不含影像約 0.1 MB/s。錄製不會自動停 — 注意剩餘空間。";
+    }
 });
 
 socket.onTopic(protocol.topics.missionStatus, (status) => {
@@ -582,6 +625,19 @@ $("button_start_mission").addEventListener("click", () => {
 
 $("button_stop_mission").addEventListener("click", () => {
     socket.sendAction(protocol.actions.stopMission);
+});
+
+// Recording. The outcome arrives back as a service result toast — the recorder
+// refuses on low disk or a missing config, and a button that silently did
+// nothing would be worse than no button.
+$("button_start_recording").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.startRecording, {
+        include_images: $("rec_images_input").checked,
+    });
+});
+
+$("button_stop_recording").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.stopRecording);
 });
 
 $("button_magnet_on").addEventListener("click", () => {

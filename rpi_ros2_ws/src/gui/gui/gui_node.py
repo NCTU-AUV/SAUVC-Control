@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 
 import rclpy
 from rclpy.node import Node
@@ -14,6 +13,7 @@ from std_msgs.msg import Float64
 from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 from geometry_msgs.msg import Wrench
+from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
 from .backend import protocol
@@ -253,13 +253,24 @@ class GUINode(Node):
         self.declare_parameter("web_video_server_port", 8080)
 
         # --- bag recording --------------------------------------------------
-        # record.launch.py wraps `ros2 bag record` in an ExecuteProcess, so
-        # there is no status topic to subscribe to. Derive it instead: the
-        # recorder's presence in the graph says whether it is running, and the
-        # bag directory says how much has been written.
-        self.declare_parameter(
-            "bag_dir", os.environ.get("ORCA_BAG_DIR", "/root/bags"))
-        self._bag_status_timer = self.create_timer(2.0, self._publish_bag_status)
+        # Status comes from the bag_recorder node rather than being inferred
+        # here. The old version guessed: recorder-in-the-graph meant recording,
+        # newest directory meant "the current bag". Both are wrong the moment a
+        # second recorder exists or somebody copies a bag in, and neither can
+        # say whether this run includes images or why a start was refused.
+        self._last_bag_status = None
+        self._recorder_status_subscriber = self.create_subscription(
+            msg_type=String,
+            topic=protocol.ROS_TOPIC_RECORDER_STATUS,
+            callback=self._recorder_status_callback,
+            qos_profile=10,
+        )
+        self._recorder_clients = {
+            protocol.RECORDER_SERVICE_START: self.create_client(
+                SetBool, protocol.RECORDER_SERVICE_START),
+            protocol.RECORDER_SERVICE_STOP: self.create_client(
+                Trigger, protocol.RECORDER_SERVICE_STOP),
+        }
         # Re-resolved periodically: the autonomy stack needs minutes to come
         # up, so a list sent once at connect would leave the detection view
         # permanently marked unavailable.
@@ -337,7 +348,9 @@ class GUINode(Node):
         camera list and a blank mode until the vehicle happened to publish.
         """
         self._publish_camera_sources()
-        self._publish_bag_status()
+        if self._last_bag_status is not None:
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BAG_STATUS, self._last_bag_status)
         if self._last_mode is not None:
             self.aiohttp_server.send_topic(
                 protocol.TOPIC_SYSTEM_MANAGER_MODE, self._last_mode)
@@ -440,49 +453,62 @@ class GUINode(Node):
             {"port": port, "sources": sources},
         )
 
-    def _publish_bag_status(self):
-        """Derive recording state from the graph plus the bag directory.
+    def _recorder_status_callback(self, msg: String):
+        """Relay the bag_recorder node's status to the browser.
 
-        There is no status topic to subscribe to — record.launch.py runs
-        `ros2 bag record` as a plain process — so "is it recording" comes from
-        the recorder node being present, and the size comes from the newest
-        directory under bag_dir.
+        Decoded here so a malformed frame is dropped at the one place that can
+        log about it, rather than reaching the page and throwing inside a topic
+        handler — same reason the mission status mirror is decoded here.
         """
-        recording = any(
-            name.startswith("rosbag2_recorder")
-            for name, _ in self.get_node_names_and_namespaces()
-        )
-        bag_dir = self._param_str("bag_dir")
-        bag_name = None
-        size_mb = None
-        free_gb = None
         try:
-            free_gb = round(shutil.disk_usage(bag_dir).free / (1024 ** 3), 1)
-            entries = [
-                os.path.join(bag_dir, entry) for entry in os.listdir(bag_dir)
-                if os.path.isdir(os.path.join(bag_dir, entry))
-            ]
-            if entries:
-                newest = max(entries, key=os.path.getmtime)
-                bag_name = os.path.basename(newest)
-                total = sum(
-                    os.path.getsize(os.path.join(newest, f))
-                    for f in os.listdir(newest)
-                    if os.path.isfile(os.path.join(newest, f))
-                )
-                size_mb = round(total / (1024 ** 2), 1)
-        except OSError as exc:
-            self.get_logger().debug(f"bag status unavailable: {exc}")
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning(
+                f"Unparsable recorder status JSON: {msg.data[:200]}")
+            return
+        if not isinstance(status, dict):
+            return
+        self._last_bag_status = status
+        self.aiohttp_server.send_topic(protocol.TOPIC_BAG_STATUS, status)
 
-        self.aiohttp_server.send_topic(
-            protocol.TOPIC_BAG_STATUS,
-            {
-                "recording": recording,
-                "bag_name": bag_name,
-                "size_mb": size_mb,
-                "free_gb": free_gb,
-            },
-        )
+    def _call_recorder(self, service_key: str, include_images: bool = False):
+        """Start or stop recording. The recorder owns the process, not us."""
+        client = self._recorder_clients.get(service_key)
+        if client is None:
+            self.get_logger().warning(f"Unknown recorder service: {service_key}")
+            return
+
+        if not client.service_is_ready():
+            message = (f"錄製服務尚未就緒: {service_key}"
+                       "（bag_recorder 節點沒起來？）")
+            self.get_logger().warning(message)
+            self._send_service_result(service_key, False, message)
+            return
+
+        if service_key == protocol.RECORDER_SERVICE_START:
+            request = SetBool.Request()
+            request.data = bool(include_images)
+        else:
+            request = Trigger.Request()
+
+        future = client.call_async(request)
+        future.add_done_callback(
+            lambda f, key=service_key: self._on_recorder_result(key, f))
+
+    def _on_recorder_result(self, service_key: str, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            message = f"錄製服務呼叫失敗: {service_key}: {exc}"
+            self.get_logger().warning(message)
+            self._send_service_result(service_key, False, message)
+            return
+
+        if response.success:
+            self.get_logger().info(f"{service_key}: {response.message}")
+        else:
+            self.get_logger().warning(f"{service_key} 被拒絕: {response.message}")
+        self._send_service_result(service_key, response.success, response.message)
 
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
@@ -640,6 +666,11 @@ class GUINode(Node):
                 self._publish_mission_enable(True, "Mission start published")
             elif action_name == protocol.ACTION_STOP_MISSION:
                 self._publish_mission_enable(False, "Mission stop published")
+            elif action_name == protocol.ACTION_START_RECORDING:
+                self._call_recorder(protocol.RECORDER_SERVICE_START,
+                                    bool(msg_data.get("include_images")))
+            elif action_name == protocol.ACTION_STOP_RECORDING:
+                self._call_recorder(protocol.RECORDER_SERVICE_STOP)
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 

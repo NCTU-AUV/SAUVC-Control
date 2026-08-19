@@ -28,6 +28,10 @@ const GuiProtocol = Object.freeze({
         safeDisable: "safe_disable",
         startMission: "start_mission",
         stopMission: "stop_mission",
+        // Recording lives in the bag_recorder node, not here — a browser
+        // reload does not interrupt a run in progress.
+        startRecording: "start_recording",
+        stopRecording: "stop_recording",
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",
