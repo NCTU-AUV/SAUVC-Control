@@ -80,7 +80,7 @@ TOPIC_BAG_STATUS = "gui/bag_status"
 # connect and only builds web_video_server URLs from it.
 TOPIC_CAMERA_SOURCES = "gui/camera_sources"
 # NOTE: mission *state* is deliberately absent. /orca/decision/status carries
-# orca_interface/msg/DecisionStatus, and orca_interface is a SAUVC-JETSON
+# orca_interface/msg/DecisionStatus, and orca_interface is a SAUVC-Autonomy
 # package that is not built into the control container — this node cannot
 # deserialise it. Starting a mission works because that topic is std_msgs/Bool.
 

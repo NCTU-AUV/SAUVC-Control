@@ -303,7 +303,7 @@ h2:hover .anchor, h3:hover .anchor{ opacity:1; }
   <div class="brand">SAUVC-RPI <span>/ ARCHITECTURE</span></div>
   <div class="sp"></div>
   <a class="btn" href="../README.md">README</a>
-  <a class="btn" href="../../SAUVC-JETSON/ARCHITECTURE.html">感知決策堆疊架構 →</a>
+  <a class="btn" href="../../SAUVC-Autonomy/ARCHITECTURE.html">感知決策堆疊架構 →</a>
   <button class="btn" id="theme" title="切換主題">◐</button>
 </header>
 
@@ -366,7 +366,7 @@ h2:hover .anchor, h3:hover .anchor{ opacity:1; }
 <p>這個 repo 是 Orca AUV 的<b>載具控制堆疊</b>：把「目標」變成「推進器出力」。</p>
 
 <p>它<b>不做</b>物件偵測、不做任務規劃 —— 那些在姊妹 repo
-<a href="../../SAUVC-JETSON/ARCHITECTURE.html"><code>SAUVC-JETSON</code></a>
+<a href="../../SAUVC-Autonomy/ARCHITECTURE.html"><code>SAUVC-Autonomy</code></a>
 （感知 + BehaviorTree 決策，本文以下稱 Autonomy 堆疊）。兩者跑在同一塊 Jetson Orin NX 上的
 兩個獨立 container，只透過 ROS 2 topic 溝通。</p>
 
@@ -374,7 +374,7 @@ h2:hover .anchor, h3:hover .anchor{ opacity:1; }
 <svg viewBox="0 0 1120 540" role="img" aria-label="控制堆疊系統總覽">
   <!-- external wrench sources (top) -->
   <rect class="box b-decide" x="600" y="12" width="170" height="56" rx="9"/>
-  <text class="t1" x="685" y="34" text-anchor="middle">SAUVC-JETSON</text>
+  <text class="t1" x="685" y="34" text-anchor="middle">SAUVC-Autonomy</text>
   <text class="t2" x="685" y="52" text-anchor="middle">決策堆疊 · 50 Hz</text>
   <rect class="box b-perceive" x="794" y="12" width="140" height="56" rx="9"/>
   <text class="t1 mono" x="864" y="34" text-anchor="middle" style="font-size:11.5px">gui_node</text>
@@ -542,7 +542,7 @@ h2:hover .anchor, h3:hover .anchor{ opacity:1; }
   <text class="t2" x="490" y="64" text-anchor="middle">深度軸（PID 輸出 ＋ bias）</text>
   <rect class="box b-sense" x="680" y="24" width="280" height="54" rx="9"/>
   <text class="t1" x="820" y="45" text-anchor="middle">Autonomy 堆疊</text>
-  <text class="t2" x="820" y="64" text-anchor="middle">SAUVC-JETSON 決策節點</text>
+  <text class="t2" x="820" y="64" text-anchor="middle">SAUVC-Autonomy 決策節點</text>
 
   <rect class="box b-control" x="20"  y="110" width="280" height="34" rx="7"/>
   <text class="t2 mono" x="160" y="127" text-anchor="middle" dominant-baseline="middle">control/wrench_sources/gui</text>

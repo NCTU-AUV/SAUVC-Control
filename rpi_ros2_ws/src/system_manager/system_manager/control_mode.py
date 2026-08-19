@@ -8,7 +8,7 @@ class ControlMode(Enum):
     現在有沒有在運作」，ControlMode 描述「操作者要載具處於哪種行為」。
     兩者的對應關係由 supervisor_node 維護。
 
-    AUTONOMOUS 代表放行 Autonomy 堆疊（SAUVC-JETSON）的
+    AUTONOMOUS 代表放行 Autonomy 堆疊（SAUVC-Autonomy）的
     control/wrench_sources/decision。在有這個模式之前，要讓決策層的指令
     到得了推進器只能先進 MANUAL（語意矛盾，而且會關掉深度 PID）或 DEPTH_HOLD
     （順帶啟用深度 PID），且沒有任何機制確認決策來源還活著。

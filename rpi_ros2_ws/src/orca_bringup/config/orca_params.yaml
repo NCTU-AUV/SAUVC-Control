@@ -63,7 +63,7 @@
     input_topics:
       - control/wrench_sources/gui       # GUI 手動
       - control/wrench_sources/depth     # 深度 PID
-      - control/wrench_sources/decision  # Autonomy 堆疊（SAUVC-JETSON）
+      - control/wrench_sources/decision  # Autonomy 堆疊（SAUVC-Autonomy）
     output_topic: control/wrench_command
     publish_rate: 30.0
     source_timeout_s: 0.5
