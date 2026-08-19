@@ -98,10 +98,66 @@
 
         <!-- ---- mission ---- -->
         <div class="panel">
-            <div class="panel-head"><span class="panel-title">Mission</span></div>
+            <div class="panel-head">
+                <span class="panel-title">Mission</span>
+                <span class="pill" id="mission_pill">&mdash;</span>
+            </div>
             <div class="field-row">
-                <button class="primary" id="button_start_mission">Start mission</button>
-                <span class="hint">publishes to the autonomy stack</span>
+                <button class="primary" id="button_start_mission">Start</button>
+                <button class="danger" id="button_stop_mission">Stop</button>
+            </div>
+            <div class="grid-2">
+                <div class="field"><span class="label">Action</span>
+                    <span class="mono" id="mission_action">&mdash;</span></div>
+                <div class="field"><span class="label">Target</span>
+                    <span class="mono" id="mission_target">&mdash;</span></div>
+                <div class="field"><span class="label">Tree</span>
+                    <span class="mono" id="mission_phase">&mdash;</span></div>
+                <!-- Which camera the tree selected. Depth is only estimated in
+                     realsense mode, so this says whether any distance the tree
+                     is acting on can be real. -->
+                <div class="field"><span class="label">Camera</span>
+                    <span class="mono" id="mission_camera">&mdash;</span></div>
+                <div class="field"><span class="label">Elapsed</span>
+                    <span class="num" id="mission_time">&mdash;</span></div>
+                <div class="field" style="grid-column: 1 / -1;">
+                    <span class="label">Node status</span>
+                    <span class="mono" id="mission_debug">&mdash;</span></div>
+            </div>
+            <div class="hint">
+                The BehaviorTree runs in the autonomy container and does not see
+                mode changes, so leaving autonomy stops it automatically &mdash;
+                including on a fault nobody clicked.
+            </div>
+        </div>
+
+        <!-- ---- recording ---- -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Recording</span>
+                <span class="pill" id="rec_pill">&mdash;</span>
+            </div>
+            <div class="field-row">
+                <button class="primary" id="button_start_recording">Record</button>
+                <button class="danger" id="button_stop_recording">Stop</button>
+                <label class="field" style="flex-direction: row; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="rec_images_input">
+                    <span class="label" style="margin: 0;">含影像</span>
+                </label>
+            </div>
+            <div class="grid-2">
+                <div class="field"><span class="label">Elapsed</span>
+                    <span class="num" id="rec_elapsed">&mdash;</span></div>
+                <div class="field"><span class="label">Size</span>
+                    <span class="num" id="rec_size">&mdash;</span></div>
+                <div class="field"><span class="label">Free disk</span>
+                    <span class="num" id="rec_free">&mdash;</span></div>
+                <div class="field"><span class="label">Topics</span>
+                    <span class="num" id="rec_topics">&mdash;</span></div>
+            </div>
+            <div class="hint" id="rec_hint">
+                含影像約 1.3 MB/s（80 MB/min），深度錄的是灰階 JPEG 不是公制深度；
+                不含影像約 0.1 MB/s。錄製不會自動停 &mdash; 注意剩餘空間。
             </div>
         </div>
 

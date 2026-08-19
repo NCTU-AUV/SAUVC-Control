@@ -8,7 +8,7 @@ package_name = 'orca_bringup'
 setup(
     name=package_name,
     version='0.0.0',
-    packages=[],
+    packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         (os.path.join('share', package_name), ['package.xml']),
@@ -23,6 +23,8 @@ setup(
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'bag_recorder_node = orca_bringup.bag_recorder_node:main',
+        ],
     },
 )

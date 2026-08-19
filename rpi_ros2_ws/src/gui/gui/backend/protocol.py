@@ -33,6 +33,15 @@ ACTION_SAFE_DISABLE = "safe_disable"
 # Mission start lives in the autonomy stack. The two containers share one ROS
 # graph, so publishing it from here works and saves the operator a shell.
 ACTION_START_MISSION = "start_mission"
+ACTION_STOP_MISSION = "stop_mission"
+# Bag recording. The recorder is a node in orca_bringup with its own process
+# lifecycle, so a browser reload or a gui_node restart does not interrupt a
+# run in progress — this GUI is a caller, not the owner.
+ACTION_START_RECORDING = "start_recording"
+ACTION_STOP_RECORDING = "stop_recording"
+
+RECORDER_SERVICE_START = "bag_recorder/start"
+RECORDER_SERVICE_STOP = "bag_recorder/stop"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
 
@@ -48,6 +57,14 @@ SUPERVISOR_SERVICE_DISABLE_AUTONOMOUS = "disable_autonomous"
 SUPERVISOR_SERVICE_RESET_CONTROLLERS = "reset_controllers"
 SUPERVISOR_SERVICE_SAFE_DISABLED = "safe_disabled"
 SUPERVISOR_SERVICE_MANUAL = "manual"
+
+# Modes in which the BehaviorTree is allowed to be flying the vehicle. Leaving
+# this set has to stop the mission: the supervisor only gates the wrench bus in
+# the control stack, so without an explicit stop the tree keeps ticking in the
+# other container — still counting down its timeouts, still overwriting the
+# depth target through SetDepth, and resuming mid-mission the moment somebody
+# re-arms.
+AUTONOMOUS_MODES = ("AUTONOMOUS", "AUTONOMOUS_AND_DEPTH_HOLD")
 
 # --- vehicle topics relayed to the browser ---------------------------------
 TOPIC_KILLED = "sensors/killed"
@@ -71,18 +88,33 @@ TOPIC_FLASH_STM32_STATUS = "flash_stm32_status"
 # the checkbox stayed ticked and the operator had no way to know why nothing
 # happened. Every supervisor call now reports back here.
 TOPIC_SERVICE_RESULT = "gui/service_result"
-# Bag recording has no status topic of its own (record.launch.py wraps
-# `ros2 bag record` in an ExecuteProcess), so the node derives this from the
-# graph plus the bag directory on disk.
+# Bag recording status. Now comes straight from the bag_recorder node
+# (bag_recorder/status, a JSON String) rather than being guessed from the ROS
+# graph plus a directory listing — the recorder knows things the graph cannot
+# show, notably whether this run includes images and why a start was refused.
 TOPIC_BAG_STATUS = "gui/bag_status"
+ROS_TOPIC_RECORDER_STATUS = "bag_recorder/status"
 # Camera stream descriptors. The topics differ between the real robot and the
 # simulator, so the browser must not hardcode them — it receives the list on
 # connect and only builds web_video_server URLs from it.
 TOPIC_CAMERA_SOURCES = "gui/camera_sources"
-# NOTE: mission *state* is deliberately absent. /orca/decision/status carries
-# orca_interface/msg/DecisionStatus, and orca_interface is a SAUVC-JETSON
-# package that is not built into the control container — this node cannot
-# deserialise it. Starting a mission works because that topic is std_msgs/Bool.
+# BehaviorTree state: which node is ticking, what it is chasing, its own debug
+# line. Relayed from ROS_TOPIC_MISSION_STATUS_JSON below, already decoded, so
+# the browser receives an object rather than a string it has to parse again.
+TOPIC_MISSION_STATUS = "decision/status"
+
+# --- cross-stack ROS topics (absolute, outside this vehicle's namespace) -----
+# The decision node runs in the autonomy container under a fixed /orca prefix.
+# Both stacks share one ROS graph, so subscribing across works; what does not
+# work is the message type. /orca/decision/status carries
+# orca_interface/msg/DecisionStatus and orca_interface is a SAUVC-JETSON package
+# that is not built into the control container, so this node cannot deserialise
+# it — which is why mission state used to be missing from the GUI entirely.
+# decision_node therefore mirrors the same fields as JSON in a std_msgs/String,
+# a type every container already has. Starting a mission has always worked for
+# the same reason: std_msgs/Bool.
+ROS_TOPIC_MISSION_STATUS_JSON = "/orca/decision/status_json"
+ROS_TOPIC_START_MISSION = "/orca/decision/start_mission"
 
 
 def topic_payload(topic_name, msg):

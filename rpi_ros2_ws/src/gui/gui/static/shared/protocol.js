@@ -27,6 +27,11 @@ const GuiProtocol = Object.freeze({
         setSupervisorDepthHold: "set_supervisor_depth_hold",
         safeDisable: "safe_disable",
         startMission: "start_mission",
+        stopMission: "stop_mission",
+        // Recording lives in the bag_recorder node, not here — a browser
+        // reload does not interrupt a run in progress.
+        startRecording: "start_recording",
+        stopRecording: "stop_recording",
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",
@@ -54,6 +59,9 @@ const GuiProtocol = Object.freeze({
         serviceResult: "gui/service_result",
         bagStatus: "gui/bag_status",
         cameraSources: "gui/camera_sources",
+        // BehaviorTree state, relayed from the autonomy container's JSON
+        // mirror of DecisionStatus. Arrives already decoded as an object.
+        missionStatus: "decision/status",
     }),
     // Vehicle modes as reported by system_manager/mode.
     modes: Object.freeze({

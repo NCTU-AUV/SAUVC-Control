@@ -136,12 +136,19 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'record',
             default_value='true',
-            description='是否隨啟動錄 bag',
+            description=('是否啟動 bag_recorder 節點（提供錄製 service）。'
+                         '注意這不是「開始錄」—— 錄製預設是手動的，由 GUI 或 '
+                         'ros2 service call 觸發。'),
+        ),
+        DeclareLaunchArgument(
+            'autostart_record',
+            default_value='false',
+            description='節點起來後立刻開始錄（比賽當天建議 true）',
         ),
         DeclareLaunchArgument(
             'record_images',
             default_value='false',
-            description='是否連影像一起錄（只錄 compressed）',
+            description='autostart 時是否含影像。不影響 GUI 上每一趟的選擇。',
         ),
         DeclareLaunchArgument(
             'video_server',
@@ -158,6 +165,7 @@ def generate_launch_description():
             launch_arguments={
                 'namespace': LaunchConfiguration('namespace'),
                 'record': LaunchConfiguration('record'),
+                'autostart': LaunchConfiguration('autostart_record'),
                 'record_images': LaunchConfiguration('record_images'),
             }.items(),
         ),

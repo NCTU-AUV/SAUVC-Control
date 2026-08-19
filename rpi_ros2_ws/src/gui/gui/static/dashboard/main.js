@@ -24,6 +24,7 @@ const state = {
     cameras: [],
     cameraPort: 8080,
     mainCameraId: null,
+    mission: null,
 };
 
 // ---------------------------------------------------------------- formatting
@@ -217,15 +218,37 @@ $("kb_depth_step_input").addEventListener("change", (e) => {
 // "Invalid topic name" and return an empty multipart body — a stream that
 // connects and then shows nothing. Topic names only ever contain slashes,
 // alphanumerics and underscores, all of which are safe here unescaped.
-function streamUrl(topic) {
+function cameraUrl(source, endpoint) {
+    const extra = source.params ? `&${source.params}` : "";
     return `http://${window.location.hostname}:${state.cameraPort}`
-        + `/stream?topic=${topic}`;
+        + `/${endpoint}?topic=${source.topic}${extra}`;
 }
 
-// Availability comes from the backend, which checks the ROS graph. The browser
-// cannot work it out for itself: an <img> pointed at an MJPEG stream fires
-// neither load nor error dependably, because the response is an endless
-// multipart body rather than one image.
+// Only the main view holds a live MJPEG connection. Thumbnails poll /snapshot
+// once a second instead.
+//
+// Four simultaneous MJPEG streams do not survive: they are four long-lived
+// connections, and in practice only two ever delivered frames — the rest sat
+// at 200 OK with nothing arriving, for 40 s and counting. Polling also costs a
+// fraction of the bandwidth, which matters on a laptop at the poolside, and a
+// thumbnail exists to answer "which channel do I want to look at", for which
+// 1 Hz is plenty.
+const THUMB_REFRESH_MS = 1000;
+let thumbTimer = null;
+
+function refreshThumbs() {
+    for (const img of document.querySelectorAll(".camera-thumb img")) {
+        const base = img.dataset.base;
+        if (base) {
+            img.src = `${base}&_=${Date.now()}`;
+        }
+    }
+}
+
+// Availability comes from the backend, which checks the ROS graph for a
+// publisher. The browser cannot work it out for itself: an <img> pointed at an
+// MJPEG stream fires neither load nor error dependably, because the response is
+// an endless multipart body rather than one image.
 function renderCameras() {
     if (!state.cameras.length) return;
     if (!state.cameras.some((c) => c.id === state.mainCameraId)) {
@@ -236,7 +259,7 @@ function renderCameras() {
     const mainImg = $("camera_main_img");
     $("camera_main_label").textContent = main.label;
     $("camera_main_empty").hidden = main.available;
-    const mainUrl = main.available ? streamUrl(main.topic) : "";
+    const mainUrl = main.available ? cameraUrl(main, "stream") : "";
     // Only reassign when it actually changed, or the stream restarts on every
     // refresh and the picture visibly stutters.
     if (mainImg.getAttribute("src") !== mainUrl) {
@@ -246,7 +269,8 @@ function renderCameras() {
 
     const thumbs = $("camera_thumbs");
     const wanted = state.cameras.filter((c) => c.id !== main.id);
-    const signature = wanted.map((c) => `${c.id}:${c.topic}:${c.available}`).join("|");
+    const signature = wanted
+        .map((c) => `${c.id}:${c.topic}:${c.available}:${c.params}`).join("|");
     if (thumbs.dataset.signature === signature) return;
     thumbs.dataset.signature = signature;
     thumbs.innerHTML = "";
@@ -258,7 +282,8 @@ function renderCameras() {
         if (source.available) {
             const img = document.createElement("img");
             img.alt = source.label;
-            img.src = streamUrl(source.topic);
+            img.dataset.base = cameraUrl(source, "snapshot");
+            img.src = img.dataset.base;
             button.appendChild(img);
         } else {
             const empty = document.createElement("div");
@@ -276,6 +301,68 @@ function renderCameras() {
         });
         thumbs.appendChild(button);
     }
+
+    if (thumbTimer === null) {
+        thumbTimer = window.setInterval(refreshThumbs, THUMB_REFRESH_MS);
+    }
+}
+
+// ------------------------------------------------------------------- mission
+//
+// The BehaviorTree lives in the autonomy container and its own status message
+// is an orca_interface type this stack cannot deserialise, so the decision node
+// mirrors the same fields as JSON and gui_node relays them. Rendered from a
+// single function because two things drive the panel — the arriving message and
+// the staleness clock — and letting them write it independently made the pill
+// flicker between the last known action and "offline".
+
+const MISSION_STALE_MS = 3000;   // the mirror runs at 5 Hz
+
+const MISSION_FIELDS = [
+    "mission_action", "mission_target", "mission_phase",
+    "mission_camera", "mission_time", "mission_debug",
+];
+
+function renderMission() {
+    const status = state.mission;
+    // Never-seen counts as offline: the autonomy container takes minutes to
+    // come up (TensorRT rebuilds its engine on a cold start), so "not there
+    // yet" is the normal state for a while and must not read as "idle".
+    const offline =
+        socket.isStale(protocol.topics.missionStatus, MISSION_STALE_MS);
+
+    if (offline || !status) {
+        setPill("mission_pill", "offline", "");
+        for (const id of MISSION_FIELDS) $(id).textContent = "—";
+        return;
+    }
+
+    const failed = status.current_action === "MissionFailed";
+    if (status.mission_started) {
+        // is_recovering means AvoidObstacle has taken the tree over. Worth its
+        // own tone: the vehicle is moving on a command nobody chose.
+        setPill("mission_pill", status.is_recovering ? "avoiding" : "running",
+            status.is_recovering ? "warn" : "ok");
+    } else if (status.mission_complete) {
+        setPill("mission_pill", failed ? "failed" : "complete",
+            failed ? "crit" : "ok");
+    } else {
+        setPill("mission_pill", "idle", "");
+    }
+
+    $("mission_action").textContent = status.current_action || "—";
+    $("mission_target").textContent = status.target_label
+        ? `${status.target_label} · ${status.target_locked ? "locked" : "no lock"}`
+        : "—";
+    $("mission_phase").textContent = status.mission_phase || "—";
+    $("mission_camera").textContent = status.camera_mode || "—";
+    // The decision node zeroes mission_time the moment the tree stops, so
+    // between runs the other readouts hold the last state the tree was in
+    // while this one would read a flat 0.0 s next to them. A dash says
+    // "not running" instead of asserting a duration that is not one.
+    $("mission_time").textContent = status.mission_started
+        ? `${fmt(status.mission_time, 1)} s` : "—";
+    $("mission_debug").textContent = status.debug || "—";
 }
 
 // -------------------------------------------------------------- thruster grid
@@ -378,6 +465,8 @@ socket.onTopic(protocol.topics.serviceResult, (result) => {
 
 socket.onTopic(protocol.topics.bagStatus, (status) => {
     const recording = status?.recording === true;
+    const images = status?.include_images === true;
+
     setPill("bag_pill", recording ? "Bag REC" : "Bag idle", recording ? "ok" : "");
     $("bag_state").textContent = recording ? "recording" : "not running";
     $("bag_name").textContent = status?.bag_name ?? "—";
@@ -385,6 +474,52 @@ socket.onTopic(protocol.topics.bagStatus, (status) => {
         status?.size_mb == null ? "—" : `${status.size_mb} MB`;
     $("bag_free").textContent =
         status?.free_gb == null ? "—" : `${status.free_gb} GB`;
+
+    // ---- Flight-tab controls ----
+    setPill("rec_pill", recording ? (images ? "REC + 影像" : "REC") : "idle",
+        recording ? (images ? "warn" : "ok") : "");
+    $("rec_elapsed").textContent =
+        status?.elapsed_s == null ? "—" : `${status.elapsed_s} s`;
+    $("rec_size").textContent =
+        status?.size_mb == null ? "—" : `${status.size_mb} MB`;
+    $("rec_free").textContent =
+        status?.free_gb == null ? "—" : `${status.free_gb} GB`;
+    $("rec_topics").textContent = status?.topic_count || "—";
+
+    // The checkbox is a request for the *next* run, so it must not be
+    // overwritten while the operator is setting it up. Once recording starts it
+    // reflects what is actually being recorded, because at that point it is a
+    // readout rather than a control.
+    const box = $("rec_images_input");
+    if (recording) {
+        box.checked = images;
+        box.disabled = true;
+    } else {
+        box.disabled = false;
+    }
+
+    // Free disk is the only thing standing between a long run and a full root
+    // partition — nothing stops recording automatically, by choice.
+    const free = Number(status?.free_gb);
+    const low = Number.isFinite(free) && free < 10;
+    $("rec_free").classList.toggle("is-stale", false);
+    $("rec_hint").className = low ? "hint warn" : "hint";
+    if (low && recording) {
+        $("rec_hint").textContent =
+            `剩餘 ${free} GB。含影像時每分鐘吃掉 2.3 GB，錄製不會自動停。`;
+    } else if (status?.error) {
+        $("rec_hint").className = "hint warn";
+        $("rec_hint").textContent = status.error;
+    } else {
+        $("rec_hint").textContent =
+            "含影像約 38 MB/s（2.3 GB/min），其中 37 MB/s 是原始深度；"
+            + "不含影像約 0.1 MB/s。錄製不會自動停 — 注意剩餘空間。";
+    }
+});
+
+socket.onTopic(protocol.topics.missionStatus, (status) => {
+    state.mission = status ?? null;
+    renderMission();
 });
 
 socket.onTopic(protocol.topics.cameraSources, (payload) => {
@@ -414,8 +549,12 @@ socket.onConnectionChange((connected) => {
         connected ? "ok" : "crit");
     if (!connected) {
         // Values on screen are now history. Say so rather than letting them
-        // sit there looking current.
+        // sit there looking current. The mission panel is cleared outright
+        // rather than left to time out, so a dropped link never leaves a
+        // "running" pill on screen for three more seconds.
         applyMode(null);
+        state.mission = null;
+        renderMission();
     }
 });
 
@@ -429,6 +568,9 @@ window.setInterval(() => {
     for (const [id, topic] of marks) {
         $(id)?.classList.toggle("is-stale", socket.isStale(topic, STALE_MS[topic]));
     }
+    // Re-run rather than mark: the mission panel drops to "offline" and blanks
+    // its readouts, which is clearer than five separate stale badges.
+    renderMission();
 }, 500);
 
 // --------------------------------------------------------------------- actions
@@ -449,16 +591,22 @@ toggleHandler("toggle_autonomous", protocol.actions.setSupervisorAutonomousMode)
 toggleHandler("toggle_manual", protocol.actions.setSupervisorManualMode);
 toggleHandler("toggle_simulation", protocol.actions.setSupervisorSimulationMode);
 
-$("estop_button").addEventListener("click", () => {
+// Stop the tree as well as the bus. gui_node also does this off the mode
+// topic, but sending it here means the mission stops on the same click rather
+// than one supervisor round-trip later.
+function emergencyStop() {
+    socket.sendAction(protocol.actions.stopMission);
     socket.sendAction(protocol.actions.safeDisable);
-});
+}
+
+$("estop_button").addEventListener("click", emergencyStop);
 
 // Esc is the stop key. No confirmation: a stop that needs a second click is
 // not an emergency stop.
 window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (!$("confirm_modal").hidden) { closeConfirm(false); return; }
-    socket.sendAction(protocol.actions.safeDisable);
+    emergencyStop();
 });
 
 $("button_reset_controllers").addEventListener("click", () => {
@@ -473,6 +621,23 @@ $("button_set_depth").addEventListener("click", () => {
 
 $("button_start_mission").addEventListener("click", () => {
     socket.sendAction(protocol.actions.startMission);
+});
+
+$("button_stop_mission").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.stopMission);
+});
+
+// Recording. The outcome arrives back as a service result toast — the recorder
+// refuses on low disk or a missing config, and a button that silently did
+// nothing would be worse than no button.
+$("button_start_recording").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.startRecording, {
+        include_images: $("rec_images_input").checked,
+    });
+});
+
+$("button_stop_recording").addEventListener("click", () => {
+    socket.sendAction(protocol.actions.stopRecording);
 });
 
 $("button_magnet_on").addEventListener("click", () => {
@@ -548,5 +713,16 @@ $("button_clear_log").addEventListener("click", () => {
 
 // ----------------------------------------------------------------------- go
 
-applyMode(null);
+// Connect even if the initial paint throws. An exception on the way down this
+// file used to take the websocket with it: the page rendered, every readout sat
+// at its placeholder, and the only clue was "Link down" — which reads as a
+// server problem rather than a bug three lines earlier in the browser.
+try {
+    applyMode(null);
+    renderMission();
+} catch (error) {
+    console.error("gui: initial render failed", error);
+    toast("GUI error", String(error && error.message || error), "crit");
+}
+
 socket.connect();

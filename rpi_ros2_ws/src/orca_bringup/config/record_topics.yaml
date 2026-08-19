@@ -72,13 +72,80 @@ absolute_topics:
   - /rosout
   - /orca/decision/status
   - /orca/decision/camera_mode
+  # 行為樹的**輸入**。少了它，bag 只能回答「決策做了什麼」，回答不了
+  # 「它當時看到什麼」—— 而 distance/valid/is_stable 這三個欄位正是
+  # gate 接近失敗時唯一能分辨「沒偵測到」與「偵測到但深度被拒絕」的依據。
+  - /orca/perception_array
 
 # -----------------------------------------------------------------------------
-# 影像 topic：預設不錄。
+# 影像 topic：預設不錄。用 `record_images:=true` 開啟。
 #
-# 原始影像會吃爆儲存並拖垮 I/O，在 Orin NX 上同時要跟 TensorRT 推論搶頻寬。
-# 需要時用 `record_images:=true` 開啟，且只錄 compressed。
+# 原始影像會吃爆儲存並拖垮 I/O，在 Orin NX 上同時要跟 TensorRT 推論搶頻寬，
+# 所以只錄壓縮過的。四路加起來原始約 130 MB/s、壓縮後實測約 1.3 MB/s。
+#
+# 這些名稱不是任何相機節點原本的 topic，而是 autonomy 容器裡專為錄製轉出來的
+# （三路彩色用 image_transport republish，深度用 depth_record_node；見
+# orca_perception/launch/perception.launch.py 的 record_images）。
+# 這麼做有兩個理由：
+#
+#   1. **壓縮外掛只有 autonomy 容器有。** control 容器只裝了核心 image_transport，
+#      沒有 compressed_image_transport / compressed_depth_image_transport，
+#      轉不出壓縮影像。錄製端不需要外掛，它只是訂閱 CompressedImage。
+#   2. **實機與模擬的相機 topic 名稱不同**（實機在 /orca 底下，模擬在載具
+#      namespace 底下）。轉發到固定名稱之後，這份清單兩邊通用。
+#
+# 兩邊的 record_images 必須一起開：control 堆疊負責錄，autonomy 堆疊負責轉，
+# 只開一邊會錄到一組完全空的 topic。用 `make sim RECORD_IMAGES=true` 一次帶到。
+#
+# 深度錄的是「畫面」，不是「量測值」。
+#
+# 這裡原本錄原始 32FC1（實測 1.23 MB/frame、35.94 MB/s，佔整包影像 bag 的
+# 九成五），為的是保留可以重跑 _estimate_gate 的公制深度。現在改成錄
+# depth_record_node 產生的灰階 JPEG —— 跟 Web GUI 的 DEPTH 面板同一種畫法
+# （0-10 m 線性映射到 0-255，近黑遠白；打不到東西的 +inf 算「很遠」跟著
+# 飽和成白，真正的無資料（NaN、16UC1 的 0）才是黑）。
+# 實測 8-10 KB/frame、0.24-0.30 MB/s（隨場景複雜度變動）—— 小兩個數量級。
+#
+# 這是有代價的取捨：8 bit 攤在 10 m 上約 4 cm 一階，JPEG 還是有損的，超過
+# 10 m 整片飽和成白色 —— 這種 bag **不能**再拿去重跑 _estimate_gate。
+# 換來的是 /orca/perception_array 仍然照錄，所以「gate 邏輯當時算出什麼」
+# 還在，只是「它是從哪張深度圖算出來的」變成只能用眼睛看。
+#
+# 真的需要公制深度的那幾趟，把 autonomy 那邊的 record_images 關掉，改用
+# `ros2 bag record /orca/aligned_depth_to_color/image_raw` 單獨錄。
+#
+# compressedDepth 不能用，所以才要自己寫節點：它把深度做反距離量化存成
+# uint16，上限寫死在 10 m（實測 ConfigHeader 為 depthQuantA=10100、
+# depthQuantB=-1009，還原式 depth_m = A / (uint16 - B)，碼值 1 就已經對應
+# 10.0 m，再遠會算出負數而被當成無效值丟掉），而這個 Humble build 的外掛
+# 沒有開放 depth_max 參數。10 m 以內精度極好（3 m 處誤差 0.3 mm），但池子
+# 場景遠達 16 m。既然無論如何都保不住 10 m 以外，不如直接錄看得懂的畫面。
+#
+# 實測（2026-08-19，模擬全鏈路，四路都有資料，33.5 MiB / 26.6 s）：
+#   depth 6.46 MB（783 張，8.1 KB/張）  front 12.01 MB（167 張，70.2 KB/張）
+#   bottom 2.78 MB（397 張，6.8 KB/張） detections 11.75 MB（153 張，75.0 KB/張）
+# 合計約 1.3 MB/s、80 MB/min。原本是 38.6 MB/s、2.3 GB/min。
+#
+# 值得注意的是深度現在是四路裡**位元組最少**的一路，而它的張數是最多的
+# （783 vs 153-397）—— 改之前它自己就佔整包的九成五。同一趟若還錄原始深度，
+# 783 張 x 1.23 MB ≈ 963 MB，整包會是約 1 GB 而不是 33.5 MiB。
 # -----------------------------------------------------------------------------
-image_topics:
-  - camera/bottom/image_raw/compressed
-  - color/image_raw/compressed
+absolute_image_topics:
+  - /orca/record/front/compressed
+  - /orca/record/bottom/compressed
+  - /orca/record/detections/compressed
+  # 深度的灰階 JPEG。跟上面三路一樣是 autonomy 容器轉出來的固定名稱，
+  # 所以實機與模擬共用同一條 —— sim/real 的深度來源差異在
+  # perception.launch.py 就解掉了，這份清單不用再分兩條。
+  - /orca/record/depth/compressed
+
+# 載具 namespace 底下的影像 topic。
+#
+# 目前是空的：四路影像全部走 /orca/record/* 的固定絕對名稱，沒有任何一條
+# 需要載具 namespace 前綴。保留這個 key 是因為 bag_recorder_node 會讀它，
+# 而且未來若有載具端自己發的影像要錄，這裡是它該去的地方。
+#
+# 這裡原本列的是 depth/image_raw（模擬的深度掛在載具 namespace 下，實機在
+# /orca 底下，兩條各放一邊讓同一份設定兩種情境都成立）。改錄灰階 JPEG 之後
+# 兩邊都收斂到 /orca/record/depth/compressed，這條就不需要了。
+image_topics: []

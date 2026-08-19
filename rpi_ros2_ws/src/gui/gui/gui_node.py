@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 
 import rclpy
 from rclpy.node import Node
@@ -14,6 +13,7 @@ from std_msgs.msg import Float64
 from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 from geometry_msgs.msg import Wrench
+from std_srvs.srv import SetBool
 from std_srvs.srv import Trigger
 
 from .backend import protocol
@@ -121,6 +121,14 @@ class GUINode(Node):
                 msg_type=String,
                 topic=protocol.TOPIC_SYSTEM_MANAGER_STATUS,
                 callback=self._supervisor_status_callback,
+                qos_profile=10
+            )
+        # Absolute, and in the autonomy container's /orca prefix rather than
+        # this vehicle's namespace — see the note on the constant.
+        self._mission_status_subscriber = self.create_subscription(
+                msg_type=String,
+                topic=protocol.ROS_TOPIC_MISSION_STATUS_JSON,
+                callback=self._mission_status_callback,
                 qos_profile=10
             )
         self._initialize_all_thrusters_client = self.create_client(
@@ -237,26 +245,44 @@ class GUINode(Node):
         self.declare_parameter("camera_front_topic", "/orca/color/image_raw")
         self.declare_parameter("camera_detections_topic", "/yolov8_processed_image")
         self.declare_parameter("camera_bottom_topic", "/orca/usb_cam/image_raw")
+        self.declare_parameter("camera_depth_topic",
+                               "/orca/aligned_depth_to_color/image_raw")
+        self.declare_parameter("camera_sim_depth_topic", f"/{ns}/depth/image_raw")
         self.declare_parameter("camera_sim_front_topic", f"/{ns}/color/image_raw")
         self.declare_parameter("camera_sim_bottom_topic", f"/{ns}/camera/bottom/image_raw")
         self.declare_parameter("web_video_server_port", 8080)
 
         # --- bag recording --------------------------------------------------
-        # record.launch.py wraps `ros2 bag record` in an ExecuteProcess, so
-        # there is no status topic to subscribe to. Derive it instead: the
-        # recorder's presence in the graph says whether it is running, and the
-        # bag directory says how much has been written.
-        self.declare_parameter(
-            "bag_dir", os.environ.get("ORCA_BAG_DIR", "/root/bags"))
-        self._bag_status_timer = self.create_timer(2.0, self._publish_bag_status)
+        # Status comes from the bag_recorder node rather than being inferred
+        # here. The old version guessed: recorder-in-the-graph meant recording,
+        # newest directory meant "the current bag". Both are wrong the moment a
+        # second recorder exists or somebody copies a bag in, and neither can
+        # say whether this run includes images or why a start was refused.
+        self._last_bag_status = None
+        self._recorder_status_subscriber = self.create_subscription(
+            msg_type=String,
+            topic=protocol.ROS_TOPIC_RECORDER_STATUS,
+            callback=self._recorder_status_callback,
+            qos_profile=10,
+        )
+        self._recorder_clients = {
+            protocol.RECORDER_SERVICE_START: self.create_client(
+                SetBool, protocol.RECORDER_SERVICE_START),
+            protocol.RECORDER_SERVICE_STOP: self.create_client(
+                Trigger, protocol.RECORDER_SERVICE_STOP),
+        }
         # Re-resolved periodically: the autonomy stack needs minutes to come
         # up, so a list sent once at connect would leave the detection view
         # permanently marked unavailable.
         self._camera_timer = self.create_timer(5.0, self._publish_camera_sources)
+        # Last topic each source resolved to, plus how many polls in a row it
+        # has been missing. Resolution is sticky — see _publish_camera_sources.
+        self._camera_resolved = {}
+        self._camera_missing = {}
 
         self._start_mission_publisher = self.create_publisher(
             Bool,
-            "/orca/decision/start_mission",
+            protocol.ROS_TOPIC_START_MISSION,
             10,
         )
         self._last_mode = None
@@ -273,18 +299,19 @@ class GUINode(Node):
     def _stm32_log_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_STM32_LOG, msg.data)
 
-    def _start_mission(self):
-        """Kick off the BehaviorTree in the autonomy stack.
+    def _publish_mission_enable(self, enabled: bool, note: str):
+        """Start or stop the BehaviorTree in the autonomy stack.
 
         Cross-stack on purpose: the two containers share one ROS graph, and
         making the operator open a shell just to publish one Bool was the last
         step of the run that could not be done from the GUI.
         """
         msg = Bool()
-        msg.data = True
+        msg.data = bool(enabled)
         self._start_mission_publisher.publish(msg)
-        self.get_logger().info("Published start_mission")
-        self._send_service_result("start_mission", True, "Mission start published")
+        self.get_logger().info(f"Published start_mission={enabled}")
+        self._send_service_result(
+            "start_mission" if enabled else "stop_mission", True, note)
 
     def _send_service_result(self, service_key: str, success: bool, message: str):
         self.aiohttp_server.send_topic(
@@ -293,8 +320,25 @@ class GUINode(Node):
         )
 
     def _supervisor_mode_callback(self, msg: String):
+        previous = self._last_mode
         self._last_mode = msg.data
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_MODE, msg.data)
+
+        # Leaving autonomy must stop the mission. The supervisor only gates the
+        # wrench bus, which lives in this stack; the BehaviorTree runs in the
+        # other container and never hears about a mode change. Without this the
+        # tree keeps ticking after STOP, Manual, or a FAULT the operator did not
+        # trigger — burning its timeouts, overwriting the depth target through
+        # SetDepth, and resuming from the middle of the run on the next arm.
+        #
+        # Driven off the mode topic rather than the button press so a fault the
+        # operator never clicked is covered too.
+        if (previous in protocol.AUTONOMOUS_MODES
+                and msg.data not in protocol.AUTONOMOUS_MODES):
+            self.get_logger().warning(
+                f"Left autonomy ({previous} -> {msg.data}); stopping mission")
+            self._publish_mission_enable(
+                False, f"Mission stopped: vehicle left autonomy ({msg.data})")
 
     def _publish_connect_snapshot(self):
         """Re-send non-periodic state whenever a browser connects.
@@ -304,7 +348,9 @@ class GUINode(Node):
         camera list and a blank mode until the vehicle happened to publish.
         """
         self._publish_camera_sources()
-        self._publish_bag_status()
+        if self._last_bag_status is not None:
+            self.aiohttp_server.send_topic(
+                protocol.TOPIC_BAG_STATUS, self._last_bag_status)
         if self._last_mode is not None:
             self.aiohttp_server.send_topic(
                 protocol.TOPIC_SYSTEM_MANAGER_MODE, self._last_mode)
@@ -329,23 +375,77 @@ class GUINode(Node):
              ["camera_detections_topic"]),
             ("bottom", "Bottom camera",
              ["camera_bottom_topic", "camera_sim_bottom_topic"]),
+            ("depth", "Depth",
+             ["camera_depth_topic", "camera_sim_depth_topic"]),
         ]
+        # Depth frames are 32FC1 metres, not 8-bit. web_video_server will scale
+        # them for you, but left to itself it picks the range per frame, so the
+        # picture brightens and darkens as the scene changes and the shade of a
+        # given surface stops meaning a given distance. Pin the window instead:
+        # 0-10 m covers the pool with the depth camera's 20 m far clip beyond it.
+        stream_params = {"depth": "min_image_value=0&max_image_value=10"}
 
         # Resolve against the live graph here rather than letting the browser
         # probe. An <img> pointed at an MJPEG stream never fires load or error
         # reliably — the response is an endless multipart body — so a frontend
         # fallback cannot tell "no publisher" from "first frame still coming".
         # This node already knows which topics exist.
-        live = {name for name, _ in self.get_topic_names_and_types()}
+        # Existence in the graph is not enough — it has to have a *publisher*.
+        # web_video_server creates a subscription for whatever topic it is
+        # asked for, so a stream request for a topic nobody publishes makes
+        # that topic appear in `get_topic_names_and_types()` from then on. The
+        # resolver then sees it as available and keeps picking it: asking for
+        # the wrong topic once is enough to lock the answer to it forever.
+        def has_publisher(topic: str) -> bool:
+            try:
+                return len(self.get_publishers_info_by_topic(topic)) > 0
+            except Exception:                                 # noqa: BLE001
+                # Raised for a name that has never existed at all.
+                return False
         sources = []
         for source_id, label, param_names in candidates:
             topics = [self._param_str(name) for name in param_names]
-            resolved = next((t for t in topics if t in live), None)
+            previous = self._camera_resolved.get(source_id)
+
+            # Sticky resolution. This runs every few seconds, and changing the
+            # answer rewrites the browser's <img> src, which tears down a
+            # working MJPEG connection and opens a new one. A restart of the
+            # control stack briefly empties the graph, so a naive re-resolve
+            # flips every source to the real-robot fallback mid-run and the
+            # whole camera panel goes blank — observed as four 200s followed by
+            # four ERR_CONNECTION_REFUSED on the other topic set.
+            #
+            # Keep the current answer while it is still live; only look again
+            # once it has been absent for several consecutive polls.
+            if previous is not None and has_publisher(previous):
+                self._camera_missing[source_id] = 0
+                resolved = previous
+            else:
+                missing = self._camera_missing.get(source_id, 0) + 1
+                self._camera_missing[source_id] = missing
+                if previous is not None and missing < 3:
+                    # Probably a restart, not a reconfiguration. Hold the
+                    # existing answer and mark it unavailable for now.
+                    resolved = None
+                    self._camera_resolved[source_id] = previous
+                    sources.append({
+                        "id": source_id,
+                        "label": label,
+                        "topic": previous,
+                        "available": False,
+                        "params": stream_params.get(source_id, ""),
+                    })
+                    continue
+                resolved = next((t for t in topics if has_publisher(t)), None)
+
+            if resolved is not None:
+                self._camera_resolved[source_id] = resolved
             sources.append({
                 "id": source_id,
                 "label": label,
-                "topic": resolved or topics[0],
+                "topic": resolved or previous or topics[0],
                 "available": resolved is not None,
+                "params": stream_params.get(source_id, ""),
             })
 
         self.aiohttp_server.send_topic(
@@ -353,52 +453,84 @@ class GUINode(Node):
             {"port": port, "sources": sources},
         )
 
-    def _publish_bag_status(self):
-        """Derive recording state from the graph plus the bag directory.
+    def _recorder_status_callback(self, msg: String):
+        """Relay the bag_recorder node's status to the browser.
 
-        There is no status topic to subscribe to — record.launch.py runs
-        `ros2 bag record` as a plain process — so "is it recording" comes from
-        the recorder node being present, and the size comes from the newest
-        directory under bag_dir.
+        Decoded here so a malformed frame is dropped at the one place that can
+        log about it, rather than reaching the page and throwing inside a topic
+        handler — same reason the mission status mirror is decoded here.
         """
-        recording = any(
-            name.startswith("rosbag2_recorder")
-            for name, _ in self.get_node_names_and_namespaces()
-        )
-        bag_dir = self._param_str("bag_dir")
-        bag_name = None
-        size_mb = None
-        free_gb = None
         try:
-            free_gb = round(shutil.disk_usage(bag_dir).free / (1024 ** 3), 1)
-            entries = [
-                os.path.join(bag_dir, entry) for entry in os.listdir(bag_dir)
-                if os.path.isdir(os.path.join(bag_dir, entry))
-            ]
-            if entries:
-                newest = max(entries, key=os.path.getmtime)
-                bag_name = os.path.basename(newest)
-                total = sum(
-                    os.path.getsize(os.path.join(newest, f))
-                    for f in os.listdir(newest)
-                    if os.path.isfile(os.path.join(newest, f))
-                )
-                size_mb = round(total / (1024 ** 2), 1)
-        except OSError as exc:
-            self.get_logger().debug(f"bag status unavailable: {exc}")
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning(
+                f"Unparsable recorder status JSON: {msg.data[:200]}")
+            return
+        if not isinstance(status, dict):
+            return
+        self._last_bag_status = status
+        self.aiohttp_server.send_topic(protocol.TOPIC_BAG_STATUS, status)
 
-        self.aiohttp_server.send_topic(
-            protocol.TOPIC_BAG_STATUS,
-            {
-                "recording": recording,
-                "bag_name": bag_name,
-                "size_mb": size_mb,
-                "free_gb": free_gb,
-            },
-        )
+    def _call_recorder(self, service_key: str, include_images: bool = False):
+        """Start or stop recording. The recorder owns the process, not us."""
+        client = self._recorder_clients.get(service_key)
+        if client is None:
+            self.get_logger().warning(f"Unknown recorder service: {service_key}")
+            return
+
+        if not client.service_is_ready():
+            message = (f"錄製服務尚未就緒: {service_key}"
+                       "（bag_recorder 節點沒起來？）")
+            self.get_logger().warning(message)
+            self._send_service_result(service_key, False, message)
+            return
+
+        if service_key == protocol.RECORDER_SERVICE_START:
+            request = SetBool.Request()
+            request.data = bool(include_images)
+        else:
+            request = Trigger.Request()
+
+        future = client.call_async(request)
+        future.add_done_callback(
+            lambda f, key=service_key: self._on_recorder_result(key, f))
+
+    def _on_recorder_result(self, service_key: str, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            message = f"錄製服務呼叫失敗: {service_key}: {exc}"
+            self.get_logger().warning(message)
+            self._send_service_result(service_key, False, message)
+            return
+
+        if response.success:
+            self.get_logger().info(f"{service_key}: {response.message}")
+        else:
+            self.get_logger().warning(f"{service_key} 被拒絕: {response.message}")
+        self._send_service_result(service_key, response.success, response.message)
 
     def _supervisor_status_callback(self, msg: String):
         self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, msg.data)
+
+    def _mission_status_callback(self, msg: String):
+        """Relay the decision node's JSON status mirror to the browser.
+
+        Decoded here rather than passed through as a string so a malformed
+        frame is dropped at the one place that can log about it, instead of
+        reaching the page and throwing inside a topic handler.
+        """
+        try:
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            self.get_logger().warning(
+                f"Unparsable decision status JSON: {msg.data[:200]}")
+            return
+        if not isinstance(status, dict):
+            self.get_logger().warning(
+                f"Decision status JSON is not an object: {msg.data[:200]}")
+            return
+        self.aiohttp_server.send_topic(protocol.TOPIC_MISSION_STATUS, status)
 
     def _request_pid_params(self):
         for group_key, group_spec in self._pid_param_groups.items():
@@ -531,7 +663,14 @@ class GUINode(Node):
                 # gated behind a confirmation dialog.
                 self._call_supervisor(protocol.SUPERVISOR_SERVICE_SAFE_DISABLED)
             elif action_name == protocol.ACTION_START_MISSION:
-                self._start_mission()
+                self._publish_mission_enable(True, "Mission start published")
+            elif action_name == protocol.ACTION_STOP_MISSION:
+                self._publish_mission_enable(False, "Mission stop published")
+            elif action_name == protocol.ACTION_START_RECORDING:
+                self._call_recorder(protocol.RECORDER_SERVICE_START,
+                                    bool(msg_data.get("include_images")))
+            elif action_name == protocol.ACTION_STOP_RECORDING:
+                self._call_recorder(protocol.RECORDER_SERVICE_STOP)
             else:
                 self.get_logger().warning(f"Unknown action request: {action_name}")
 
