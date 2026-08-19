@@ -7,8 +7,9 @@
   沒辦法用 launch 參數表達。原本「隨 bringup 自動開錄」的考量（比賽時沒有
   人會記得按錄影）保留成 `autostart` 參數，預設關閉。
 * topic 清單仍然來自 config/record_topics.yaml，與程式碼分離。影像改成
-  **每一趟**的選擇而不是每次開機的選擇：含影像約 38 MB/s、不含約 0.1 MB/s，
-  這個差距大到不該綁在啟動參數上。
+  **每一趟**的選擇而不是每次開機的選擇：含影像約 1.3 MB/s、不含約 0.1 MB/s，
+  這個差距大到不該綁在啟動參數上。（深度改錄灰階 JPEG 之前含影像是
+  38 MB/s，其中 37 MB/s 是原始深度 —— 見 record_topics.yaml。）
 * 空間檢查移到「按下開始」的時候做，而不是開機時做一次。
 
 這個檔案原本用 ExecuteProcess 包 `ros2 bag record`，並在註解裡寫著「等到
@@ -54,7 +55,7 @@ def generate_launch_description():
             'record_images',
             default_value='false',
             description=('autostart 時是否含影像。不影響 GUI 上的每趟選擇。'
-                         '含影像約 38 MB/s（其中 37 MB/s 是原始深度）。'),
+                         '含影像約 1.3 MB/s（四路壓縮，深度是灰階 JPEG 不是原始深度）。'),
         ),
         DeclareLaunchArgument(
             'bag_dir',

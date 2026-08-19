@@ -11,7 +11,7 @@ The process is still `ros2 bag record`. What this node adds is a lifecycle:
 * start/stop over services, so the GUI is a caller rather than the owner. A
   browser reload, or a gui_node restart, does not interrupt a recording.
 * the topic list resolved from record_topics.yaml at start time, with images
-  as a per-run choice instead of a launch argument. Images are ~38 MB/s against
+  as a per-run choice instead of a launch argument. Images are ~1.3 MB/s against
   ~0.1 MB/s without them, so "which run do I want pictures for" is a decision
   that has to be made per run, not per boot.
 * SIGINT rather than SIGKILL on stop, and a wait for the process to exit, so
