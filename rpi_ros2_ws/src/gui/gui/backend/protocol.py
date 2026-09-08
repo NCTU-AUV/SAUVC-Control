@@ -44,11 +44,20 @@ RECORDER_SERVICE_START = "bag_recorder/start"
 RECORDER_SERVICE_STOP = "bag_recorder/stop"
 
 CONTROLLER_GROUP_DEPTH_CONTROL = "depth_control"
+# Not a PID-controlled node group like depth_control above — "mission" only
+# carries the one set_pool_depth action, routed straight to decision_node in
+# the autonomy container rather than through _controller_groups/_get_param_client's
+# per-vehicle-node fan-out.
+CONTROLLER_GROUP_MISSION = "mission"
 
 CONTROLLER_ACTION_ENABLE = "enable"
 CONTROLLER_ACTION_DISABLE = "disable"
 CONTROLLER_ACTION_RESET = "reset"
 CONTROLLER_ACTION_SET_PID_PARAMS = "set_pid_params"
+# 決賽現場池深校正。三個值（gate/drop/flare pool depth，公尺）打到 decision_node
+# 的同名參數，decision_node 立刻換算並在任務進行中重發 desired_depth —— 資格
+# 賽的 SetDepth 全部用字面值，不讀這幾個參數，這個動作對資格賽零影響。
+CONTROLLER_ACTION_SET_POOL_DEPTH = "set_pool_depth"
 
 SUPERVISOR_SERVICE_DEPTH_HOLD = "depth_hold"
 SUPERVISOR_SERVICE_DISABLE_DEPTH_HOLD = "disable_depth_hold"
@@ -115,6 +124,13 @@ TOPIC_MISSION_STATUS = "decision/status"
 # the same reason: std_msgs/Bool.
 ROS_TOPIC_MISSION_STATUS_JSON = "/orca/decision/status_json"
 ROS_TOPIC_START_MISSION = "/orca/decision/start_mission"
+# decision_node's parameter services, for set_pool_depth. Absolute and outside
+# this vehicle's namespace for the same reason as the two topics above — the
+# node lives in the autonomy container's fixed /orca prefix, not under
+# self.get_namespace(). _get_param_client builds "<name>/set_parameters" from
+# this, so the leading slash is what keeps it from resolving into our own
+# namespace.
+ROS_NODE_DECISION = "/decision_node"
 
 
 def topic_payload(topic_name, msg):

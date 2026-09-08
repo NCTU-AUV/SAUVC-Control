@@ -35,12 +35,18 @@ const GuiProtocol = Object.freeze({
     }),
     controllerGroups: Object.freeze({
         depthControl: "depth_control",
+        // Not a PID node group like depthControl — routes straight to
+        // decision_node in the autonomy container, see setPoolDepth below.
+        mission: "mission",
     }),
     controllerActions: Object.freeze({
         enable: "enable",
         disable: "disable",
         reset: "reset",
         setPidParams: "set_pid_params",
+        // 決賽現場池深校正：gate/drop/flare 三個池深（公尺）打到 decision_node，
+        // 資格賽不讀這幾個參數。
+        setPoolDepth: "set_pool_depth",
     }),
     topics: Object.freeze({
         killed: "sensors/killed",

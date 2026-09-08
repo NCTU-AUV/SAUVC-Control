@@ -323,6 +323,12 @@ const MISSION_FIELDS = [
     "mission_camera", "mission_time", "mission_debug",
 ];
 
+// Finals-only pool depth zones. decision_node computes these from whatever
+// pool_depth_*_m the operator last applied (see Tuning tab) and mirrors both
+// the raw inputs (pool_depths) and the clamped results (zone_depths) onto the
+// same status_json the rest of this panel reads — no separate topic needed.
+const POOL_DEPTH_ZONES = ["gate", "drop", "flare"];
+
 function renderMission() {
     const status = state.mission;
     // Never-seen counts as offline: the autonomy container takes minutes to
@@ -334,6 +340,9 @@ function renderMission() {
     if (offline || !status) {
         setPill("mission_pill", "offline", "");
         for (const id of MISSION_FIELDS) $(id).textContent = "—";
+        for (const zone of POOL_DEPTH_ZONES) {
+            $(`pool_depth_${zone}_computed`).textContent = "—";
+        }
         return;
     }
 
@@ -363,6 +372,28 @@ function renderMission() {
     $("mission_time").textContent = status.mission_started
         ? `${fmt(status.mission_time, 1)} s` : "—";
     $("mission_debug").textContent = status.debug || "—";
+
+    for (const zone of POOL_DEPTH_ZONES) {
+        const computed = Number((status.zone_depths || {})[zone]);
+        $(`pool_depth_${zone}_computed`).textContent = fmt(computed, 2);
+
+        // Only prefill from the vehicle's current value while the operator
+        // isn't mid-edit — same rule as the depth PID readout below, so typing
+        // a new pool depth doesn't get overwritten by the 5 Hz mirror before
+        // Apply is clicked.
+        const raw = Number((status.pool_depths || {})[zone]);
+        const input = $(`pool_depth_${zone}_input`);
+        if (input && document.activeElement !== input && Number.isFinite(raw)) {
+            input.value = String(raw);
+        }
+    }
+
+    const zoneHint = $("pool_depth_zone_hint");
+    if (zoneHint) {
+        zoneHint.textContent = status.depth_zone
+            ? `takes effect immediately — tree is currently in zone "${status.depth_zone}"`
+            : "takes effect next time the tree enters a finals depth zone (not in one right now)";
+    }
 }
 
 // -------------------------------------------------------------- thruster grid
@@ -657,6 +688,19 @@ $("button_set_pid").addEventListener("click", () => {
                 integral_gain: $("pid_i_input").value,
                 derivative_gain: $("pid_d_input").value,
                 derivative_smoothing_factor: $("pid_smoothing_input").value,
+            },
+        });
+});
+
+$("button_set_pool_depth").addEventListener("click", () => {
+    socket.sendController(
+        protocol.controllerGroups.mission,
+        protocol.controllerActions.setPoolDepth,
+        {
+            params: {
+                pool_depth_gate_m: $("pool_depth_gate_input").value,
+                pool_depth_drop_m: $("pool_depth_drop_input").value,
+                pool_depth_flare_m: $("pool_depth_flare_input").value,
             },
         });
 });

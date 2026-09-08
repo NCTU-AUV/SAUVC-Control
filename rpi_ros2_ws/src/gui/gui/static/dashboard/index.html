@@ -233,6 +233,30 @@
     </div>
 
     <div class="panel">
+        <div class="panel-head">
+            <span class="panel-title">Pool depth</span>
+            <span class="panel-note">finals only &mdash; qualification is unaffected</span>
+        </div>
+        <div class="grid-3">
+            <label class="field"><span class="label">Gate (m)</span>
+                <input type="number" step="0.05" min="0.5" max="5" id="pool_depth_gate_input"></label>
+            <label class="field"><span class="label">Drop (m)</span>
+                <input type="number" step="0.05" min="0.5" max="5" id="pool_depth_drop_input"></label>
+            <label class="field"><span class="label">Flare (m)</span>
+                <input type="number" step="0.05" min="0.5" max="5" id="pool_depth_flare_input"></label>
+        </div>
+        <div class="grid-3 hint">
+            <span>dive to <b class="num" id="pool_depth_gate_computed">&mdash;</b> m</span>
+            <span>dive to <b class="num" id="pool_depth_drop_computed">&mdash;</b> m</span>
+            <span>dive to <b class="num" id="pool_depth_flare_computed">&mdash;</b> m</span>
+        </div>
+        <div class="field-row">
+            <button class="primary" id="button_set_pool_depth">Apply</button>
+            <span class="hint" id="pool_depth_zone_hint">takes effect immediately if the tree is currently in that zone</span>
+        </div>
+    </div>
+
+    <div class="panel">
         <div class="panel-head"><span class="panel-title">Manual wrench</span></div>
         <div class="grid-3">
             <label class="field"><span class="label">Force X</span>

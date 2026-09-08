@@ -740,7 +740,15 @@ class GUINode(Node):
         if msg_type == protocol.TYPE_CONTROLLER:
             group = msg_data.get(protocol.FIELD_GROUP)
             action = msg_data.get(protocol.FIELD_ACTION)
-            if not group or group not in self._controller_groups:
+            # mission/set_pool_depth targets decision_node directly, not one of
+            # the per-vehicle-node groups in _controller_groups, so it is
+            # checked before the "unknown group" fallback below would reject it.
+            if (
+                group == protocol.CONTROLLER_GROUP_MISSION
+                and action == protocol.CONTROLLER_ACTION_SET_POOL_DEPTH
+            ):
+                self._set_pool_depths(msg_data.get(protocol.FIELD_PARAMS, {}))
+            elif not group or group not in self._controller_groups:
                 self.get_logger().warning(f"Unknown controller group: {msg_data}")
             elif action == protocol.CONTROLLER_ACTION_SET_PID_PARAMS:
                 self._set_group_pid_params(group, msg_data.get(protocol.FIELD_PARAMS, {}))
@@ -969,6 +977,77 @@ class GUINode(Node):
             return None
 
         return p, i, d, smoothing
+
+    # 決賽現場池深校正的參數名，跟 decision_node/decision_context.hpp 宣告的
+    # 三個 pool_depth_*_m 一字不差 —— 資格賽不讀這幾個參數，改壞了也頂多是
+    # decision_node 拒絕（回傳的 reason 會送回 TOPIC_SYSTEM_MANAGER_STATUS），
+    # 不會動到資格賽任何一棵樹。
+    _POOL_DEPTH_PARAM_NAMES = ("pool_depth_gate_m", "pool_depth_drop_m", "pool_depth_flare_m")
+    # decision_context.hpp 的 min_depth/hull_bottom_margin 已經會夾住換算結果，
+    # 這裡的範圍只是擋掉打錯數量級的輸入（例如打成公分、或多打一個 0）—— 那種
+    # 錯誤 clamp 救不了，因為它本身就是個「合理但錯的」數字。
+    _POOL_DEPTH_MIN_M = 0.3
+    _POOL_DEPTH_MAX_M = 5.0
+
+    def _set_pool_depths(self, params):
+        values = {}
+        for name in self._POOL_DEPTH_PARAM_NAMES:
+            if name not in params:
+                continue
+            try:
+                value = float(params[name])
+            except (TypeError, ValueError):
+                message = f"Pool depth update rejected: {name} is not a number ({params[name]!r})"
+                self.get_logger().warning(message)
+                self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+                return
+            if not (self._POOL_DEPTH_MIN_M <= value <= self._POOL_DEPTH_MAX_M):
+                message = (
+                    f"Pool depth update rejected: {name}={value} outside "
+                    f"[{self._POOL_DEPTH_MIN_M}, {self._POOL_DEPTH_MAX_M}] m"
+                )
+                self.get_logger().warning(message)
+                self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+                return
+            values[name] = value
+
+        if not values:
+            self.get_logger().warning(f"set_pool_depth called with no known params: {params}")
+            return
+
+        client = self._get_param_client(protocol.ROS_NODE_DECISION)
+        if not client.service_is_ready():
+            message = "Pool depth update failed: decision_node parameter service not ready"
+            self.get_logger().warning(message)
+            self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+            return
+
+        parameters = [
+            Parameter(name, Parameter.Type.DOUBLE, value)
+            for name, value in values.items()
+        ]
+        future = client.set_parameters(parameters)
+        future.add_done_callback(self._log_pool_depth_result)
+
+    def _log_pool_depth_result(self, future):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            message = f"Pool depth update failed: {exc}"
+            self.get_logger().warning(message)
+            self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+            return
+
+        for res in response.results:
+            if not res.successful:
+                message = f"Pool depth update rejected: {res.reason}"
+                self.get_logger().warning(message)
+                self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
+                return
+
+        message = "Pool depth updated"
+        self.get_logger().info(message)
+        self.aiohttp_server.send_topic(protocol.TOPIC_SYSTEM_MANAGER_STATUS, message)
 
 
 def main(args=None):
