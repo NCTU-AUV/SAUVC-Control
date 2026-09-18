@@ -26,6 +26,9 @@ class SupervisorNode(Node):
         self.declare_parameter("auto_flash_stm32_on_startup", True)
         self.declare_parameter("stm32_flash_service", "/flash_stm32")
         self.declare_parameter("stm32_flash_service_timeout_s", 15.0)
+        self.declare_parameter("auto_initialize_thrusters_on_killed_recovery", True)
+        self.declare_parameter("thrusters_initialize_service", "thrusters/initialize_all")
+        self.declare_parameter("thrusters_initialize_service_timeout_s", 15.0)
 
         # 有 lifecycle 節點要啟停的群組。
         self._controller_groups = {
@@ -56,9 +59,20 @@ class SupervisorNode(Node):
             },
         )
         self._wrench_sum_active = False
+        self._last_killed_state = None
+        self._have_killed_state = False
+        self._auto_initialize_thrusters_in_progress = False
+        self._auto_initialize_thrusters_request_pending = False
+        self._auto_initialize_thrusters_start_stamp = None
+        self._auto_initialize_thrusters_timer = None
 
         self._mode_publisher = self.create_publisher(String, "system_manager/mode", 10)
         self._status_publisher = self.create_publisher(String, "system_manager/status", 10)
+
+        self._initialize_all_thrusters_client = self.create_client(
+            Trigger,
+            self.get_parameter("thrusters_initialize_service").value,
+        )
 
         self.create_subscription(Bool, "sensors/killed", self._on_killed, 10)
         self.create_subscription(Bool, "thrusters/enabled", self._on_thrusters_enabled, 10)
@@ -97,11 +111,24 @@ class SupervisorNode(Node):
 
         self.create_timer(0.2, self._publish_state)
         self.create_timer(0.2, self._check_active_mode_safety)
+        self._auto_initialize_thrusters_timer = self.create_timer(
+            0.5,
+            self._maybe_initialize_all_thrusters,
+        )
         self._stm32_auto_flasher = Stm32AutoFlasher(self, self._set_status)
 
     def _on_killed(self, msg: Bool):
         killed = bool(msg.data)
+        should_initialize_thrusters = (
+            self._have_killed_state
+            and self._last_killed_state is True
+            and killed is False
+        )
+        self._last_killed_state = killed
+        self._have_killed_state = True
         self._safety.update_killed(killed)
+        if should_initialize_thrusters:
+            self._start_auto_initialize_all_thrusters()
         if self._safety.require_not_killed() and killed:
             self._enter_fault("Killed")
 
@@ -235,6 +262,66 @@ class SupervisorNode(Node):
         response.message = "Controller reset requests sent"
         return response
 
+    def _start_auto_initialize_all_thrusters(self):
+        if (
+            self._auto_initialize_thrusters_in_progress
+            or self._auto_initialize_thrusters_request_pending
+        ):
+            return
+
+        if not self.get_parameter("auto_initialize_thrusters_on_killed_recovery").value:
+            self.get_logger().info("Thruster auto-initialization disabled")
+            return
+
+        self._auto_initialize_thrusters_in_progress = True
+        self._auto_initialize_thrusters_start_stamp = self.get_clock().now()
+        self._set_status("Thruster auto-initialization started")
+        self.get_logger().info("Thruster auto-initialization started")
+
+    def _maybe_initialize_all_thrusters(self):
+        if not self._auto_initialize_thrusters_in_progress:
+            return
+
+        if self._initialize_all_thrusters_client.service_is_ready():
+            self._auto_initialize_thrusters_in_progress = False
+            self._auto_initialize_thrusters_request_pending = True
+            self.get_logger().info("Thruster auto-initialization request sent")
+            future = self._initialize_all_thrusters_client.call_async(Trigger.Request())
+            future.add_done_callback(self._on_initialize_all_thrusters_result)
+            return
+
+        timeout_s = float(self.get_parameter("thrusters_initialize_service_timeout_s").value)
+        if self._age_s(self._auto_initialize_thrusters_start_stamp) > timeout_s:
+            self._auto_initialize_thrusters_in_progress = False
+            service_name = self.get_parameter("thrusters_initialize_service").value
+            status = f"Thruster auto-initialization skipped: {service_name} service not ready"
+            self._set_status(status)
+            self.get_logger().warning(status)
+
+    def _on_initialize_all_thrusters_result(self, future):
+        self._auto_initialize_thrusters_request_pending = False
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            status = f"Thruster auto-initialization failed: {exc}"
+            self._set_status(status)
+            self.get_logger().warning(status)
+            return
+
+        if response.success:
+            status = "Thruster auto-initialization succeeded"
+            if response.message:
+                status = f"{status}: {response.message}"
+            self._set_status(status)
+            self.get_logger().info(status)
+            return
+
+        status = "Thruster auto-initialization failed"
+        if response.message:
+            status = f"{status}: {response.message}"
+        self._set_status(status)
+        self.get_logger().warning(status)
+
     def _set_status(self, status: str):
         self._status = status
 
@@ -354,6 +441,9 @@ class SupervisorNode(Node):
         status_msg = String()
         status_msg.data = self._status
         self._status_publisher.publish(status_msg)
+
+    def _age_s(self, stamp):
+        return (self.get_clock().now() - stamp).nanoseconds / 1e9
 
 
 def main(args=None):
