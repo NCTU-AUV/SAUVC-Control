@@ -65,3 +65,37 @@
     # ESC 開機需要先持續收到中位 PWM 一段時間才會完成解鎖。
     initial_pwm_output_signal_value_us: 1500
     hold_after_enable_duration_s: 3.5
+
+# --- PWM → MAVLink（僅實機，且 thruster_backend:=mavlink 時才啟動）-----------
+/**/thruster_pwm_to_mavlink_servo_output_node:
+  ros__parameters:
+    # 推進器編號 0..7 → 飛控 SERVO 輸出編號。拉線順序不同時改這裡，
+    # 不要去動 wrench_to_individual_thrusters_output_forces_node 的幾何。
+    servo_output_channels: [1, 2, 3, 4, 5, 6, 7, 8]
+
+    neutral_pwm_output_signal_value_us: 1500
+    # 對應 thruster_lookup_table_16V.csv 的範圍，送進 ESC 前的最後一道限幅。
+    min_pwm_output_signal_value_us: 1100
+    max_pwm_output_signal_value_us: 1900
+
+    # 與上游 set_pwm_output_signal_value_max_publish_rate_hz 對齊。
+    # 每個週期最多 8 筆 COMMAND_LONG，往上調之前先確認飛控吃得消。
+    output_rate_hz: 20.0
+
+    # 收不到 thrusters/pwm_us 超過這個時間就輸出中位值。
+    # STM32 那條路徑沒有這個保護（斷線時推進器會維持最後轉速），
+    # 數值與 wrench_sum 的 source_timeout_s 一致。<= 0 停用。
+    command_timeout_s: 0.5
+
+    # 值沒變就不重送，但每隔這麼久整批重送一次，避免單筆掉包
+    # 讓某顆推進器永遠停在錯的值上。
+    full_refresh_interval_s: 1.0
+    heartbeat_rate_hz: 1.0
+
+    # 裝置路徑不在這裡，由 launch 從 .env 的 ORCA_FLIGHT_CONTROLLER_PORT 帶入。
+    mavlink_baud: 115200
+    mavlink_source_system: 255
+    mavlink_source_component: 190
+    # 0 = 從飛控的 HEARTBEAT 自動學。
+    target_system: 0
+    target_component: 1

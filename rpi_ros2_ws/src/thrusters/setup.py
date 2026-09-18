@@ -27,6 +27,7 @@ setup(
             "thruster_initialization_node = thrusters.thruster_initialization_node:main",
             "thruster_force_to_pwm_output_signal_node = thrusters.thruster_force_to_pwm_output_signal_node:main",
             "wrench_to_individual_thrusters_output_forces_node = thrusters.wrench_to_individual_thrusters_output_forces_node:main",
+            "thruster_pwm_to_mavlink_servo_output_node = thrusters.thruster_pwm_to_mavlink_servo_output_node:main",
         ],
     },
 )
