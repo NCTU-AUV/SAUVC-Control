@@ -8,11 +8,21 @@
 兩邊已經開始各自漂移（wrench_sum 的來源清單就已經不一致）。現在兩者共用
 同一份節點定義，差異只有兩處，而且都很明確：
 
-1. 硬體專屬節點只在 sim=false 時啟動（micro_ros_agent、stm32_flasher_node、
-   thruster_initialization_node、thruster_force_to_pwm_output_signal_node）。
+1. 硬體專屬節點只在 sim=false 時啟動（thruster_initialization_node、
+   thruster_force_to_pwm_output_signal_node，以及所選後端的 I/O 節點）。
    模擬的這段 I/O 由 SAUVC-Simulation 的 ros_gz_bridge 接手，分配層只到
    「每顆推進器的力」為止。
 2. sim=true 時額外疊上 config/sim_overrides.yaml。
+
+另有 thruster_backend 開關，決定誰把 thrusters/pwm_us 變成真的波形：
+
+    stm32   （預設）micro_ros_agent + stm32_flasher_node，原本的 STM32 路徑
+    mavlink thruster_pwm_to_mavlink_servo_output_node，送給 ArduSub 飛控
+
+    ros2 launch orca_bringup bringup.launch.py thruster_backend:=mavlink
+
+上游（分配層、力→PWM、ESC 初始化）兩者完全共用，所以要換回去只是改這個開關。
+兩個後端都訂閱 thrusters/pwm_us，**不要同時啟動**，會有兩個東西搶著驅動推進器。
 
 所有參數都來自 config/ 底下的 YAML，不寫在這個檔案裡。裝置路徑來自環境變數
 （見 repo 根目錄的 .env），因為 compose 也要用同一份值去掛裝置。
@@ -47,16 +57,31 @@ def _launch_setup(context, *args, **kwargs):
     if sim:
         params.append(os.path.join(config_dir, 'sim_overrides.yaml'))
 
-    def node(package, executable, name, **kwargs):
+    def node(package, executable, name, extra_parameters=None, **kwargs):
         return Node(
             package=package,
             executable=executable,
             namespace=namespace,
             name=name,
-            parameters=params,
+            parameters=params + (extra_parameters or []),
             output='screen',
             **kwargs,
         )
+
+    # 推進器輸出後端。'stm32' 是原本的 micro-ROS 路徑，'mavlink' 走新的
+    # ArduSub 飛控。上游（分配層、力→PWM、ESC 初始化）兩者共用，
+    # 差別只在誰訂閱 thrusters/pwm_us 去產生波形。
+    thruster_backend = LaunchConfiguration('thruster_backend').perform(context)
+    if thruster_backend not in ('stm32', 'mavlink'):
+        raise RuntimeError(
+            f"thruster_backend 只能是 'stm32' 或 'mavlink'，收到 '{thruster_backend}'"
+        )
+
+    # 走 mavlink 時 stm32_flasher_node 不會啟動，supervisor 的開機自動燒錄
+    # 會卡在等一個不存在的 service 直到逾時，所以這裡直接關掉。
+    supervisor_extra_parameters = (
+        [] if thruster_backend == 'stm32' else [{'auto_flash_stm32_on_startup': False}]
+    )
 
     # --- 感測邊界 ------------------------------------------------------------
     common = [
@@ -87,7 +112,8 @@ def _launch_setup(context, *args, **kwargs):
              'wrench_to_individual_thrusters_output_forces_node'),
 
         # --- 系統管理 ---------------------------------------------------------
-        node('system_manager', 'supervisor_node', 'supervisor_node'),
+        node('system_manager', 'supervisor_node', 'supervisor_node',
+             extra_parameters=supervisor_extra_parameters),
         node('gui', 'gui_node', 'gui_node',
              remappings=[('control/wrench_command', 'control/wrench_sources/gui')]),
     ]
@@ -96,23 +122,38 @@ def _launch_setup(context, *args, **kwargs):
         return common
 
     # --- 以下只在實機啟動 ----------------------------------------------------
-    stm32_port = LaunchConfiguration('stm32_serial_port').perform(context)
+    # 力 → PWM 與 ESC 初始化兩個後端都要，它們只負責把 thrusters/pwm_us 生出來。
     hardware_only = [
         node('thrusters', 'thruster_initialization_node', 'thruster_initialization_node'),
         node('thrusters', 'thruster_force_to_pwm_output_signal_node',
              'thruster_force_to_pwm_output_signal_node'),
-        node('stm32_manager', 'stm32_flasher_node', 'stm32_flasher_node'),
-        # micro_ros_agent 不吃 ROS 參數，序列埠只能走命令列引數。
-        # 預設用 /dev/serial/by-id/... 這種穩定路徑，因為搬到 Jetson 之後
-        # /dev/ttyUSB* 的編號不保證與 RPi 相同。
-        Node(
-            package='micro_ros_agent',
-            executable='micro_ros_agent',
-            name='micro_ros_agent',
-            arguments=['serial', '--dev', stm32_port],
-            output='screen',
-        ),
     ]
+
+    if thruster_backend == 'stm32':
+        stm32_port = LaunchConfiguration('stm32_serial_port').perform(context)
+        hardware_only += [
+            node('stm32_manager', 'stm32_flasher_node', 'stm32_flasher_node'),
+            # micro_ros_agent 不吃 ROS 參數，序列埠只能走命令列引數。
+            # 預設用 /dev/serial/by-id/... 這種穩定路徑，因為搬到 Jetson 之後
+            # /dev/ttyUSB* 的編號不保證與 RPi 相同。
+            Node(
+                package='micro_ros_agent',
+                executable='micro_ros_agent',
+                name='micro_ros_agent',
+                arguments=['serial', '--dev', stm32_port],
+                output='screen',
+            ),
+        ]
+    else:
+        flight_controller_port = LaunchConfiguration('flight_controller_port').perform(context)
+        hardware_only += [
+            # 裝置路徑從 .env 來（compose 也要用同一份值去掛裝置），
+            # 其餘參數在 hardware.yaml。
+            node('thrusters', 'thruster_pwm_to_mavlink_servo_output_node',
+                 'thruster_pwm_to_mavlink_servo_output_node',
+                 extra_parameters=[{'mavlink_device': flight_controller_port}]),
+        ]
+
     return common + hardware_only
 
 
@@ -127,6 +168,18 @@ def generate_launch_description():
             'sim',
             default_value='false',
             description='true 時跳過硬體節點並疊上 sim_overrides.yaml',
+        ),
+        DeclareLaunchArgument(
+            'thruster_backend',
+            default_value=os.environ.get('ORCA_THRUSTER_BACKEND', 'stm32'),
+            description=('推進器輸出後端：stm32（micro-ROS，原本的路徑）或 '
+                         'mavlink（ArduSub 飛控）。預設仍是 stm32，'
+                         '因為 mavlink 路徑還沒在實機驗證過。'),
+        ),
+        DeclareLaunchArgument(
+            'flight_controller_port',
+            default_value=os.environ.get('ORCA_FLIGHT_CONTROLLER_PORT', '/dev/ttyACM0'),
+            description='ArduSub 飛控的 USB 序列埠（建議用 /dev/serial/by-id/ 穩定路徑）',
         ),
         DeclareLaunchArgument(
             'stm32_serial_port',

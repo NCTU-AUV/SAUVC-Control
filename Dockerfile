@@ -32,6 +32,7 @@ RUN echo "source ~/uros_ws/install/local_setup.bash" >> /etc/bash.bashrc
 RUN apt-get update && apt-get install -y --no-install-recommends \
         stlink-tools \
         ros-humble-mavros \
+        python3-pymavlink \
  && rm -rf /var/lib/apt/lists/*
 
 RUN source /opt/ros/humble/setup.bash && ros2 run mavros install_geographiclib_datasets.sh
